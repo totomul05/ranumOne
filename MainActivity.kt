@@ -3,6 +3,7 @@ package com.ranum.one
 import android.app.DatePickerDialog
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -63,6 +64,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val dao = AppDb.get(this).dao()
+        Stamp.see(prefs(this).getLong("seen", 0L))
         setContent { MaterialTheme { App(dao) } }
     }
 }
@@ -131,6 +133,12 @@ fun App(dao: AppDao) {
     val gold = sets.firstOrNull { it.k == "gold" }?.v?.toLongOrNull() ?: 0L
     val other = sets.firstOrNull { it.k == "other" }?.v?.toLongOrNull() ?: 0L
     val led = remember(days, assets, priors, gold, other) { Ledger(days, assets, priors, gold, other) }
+    LaunchedEffect(days, assets, priors, sets) {
+        days.forEach { Stamp.see(it.updated) }
+        assets.forEach { Stamp.see(it.updated) }
+        priors.forEach { Stamp.see(it.updated) }
+        sets.forEach { Stamp.see(it.updated) }
+    }
 
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -139,6 +147,23 @@ fun App(dao: AppDao) {
     var settings by remember { mutableStateOf(false) }
     var syncMsg by remember { mutableStateOf("") }
     var conflict by remember { mutableStateOf<SyncResult.Conflicts?>(null) }
+    var exportMonth by remember { mutableStateOf<LocalDate?>(null) }
+
+    val xlsx = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    ) { u ->
+        val m = exportMonth
+        if (u != null && m != null) {
+            scope.launch {
+                val msg = exportMonthXlsx(ctx, led, m, u)
+                Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    val onExport: (LocalDate) -> Unit = { m ->
+        exportMonth = m
+        xlsx.launch("ranumOne-%d-%02d.xlsx".format(m.year, m.monthValue))
+    }
 
     val runSync: (Uri, Policy?, Boolean) -> Unit = { uri, policy, write ->
         scope.launch {
@@ -179,7 +204,7 @@ fun App(dao: AppDao) {
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
                     3 -> Assets(led, dao, scope)
-                    else -> Reports(led)
+                    else -> Reports(led, onExport)
                 }
             }
         }
@@ -304,7 +329,7 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
                             f[0].num().toInt(), f[1].num().toInt(), f[2].num().toInt(),
                             f[3].num(), f[4].num(), f[5],
                             f[6].num(), f[7].num(), f[8],
-                            f[9].num(), System.currentTimeMillis(), false
+                            f[9].num(), Stamp.next(), false
                         )
                     )
                     msg = "Tersimpan ✓"
@@ -314,7 +339,7 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
         ) { Text("Simpan") }
         if (msg.isNotEmpty()) Text(msg)
         if (cur != null) {
-            TextButton({ scope.launch { dao.putDaily(cur.copy(deleted = true, updated = System.currentTimeMillis())) } }) { Text("Hapus data tanggal ini") }
+            TextButton({ scope.launch { dao.putDaily(cur.copy(deleted = true, updated = Stamp.next())) } }) { Text("Hapus data tanggal ini") }
         }
     }
 }
@@ -353,7 +378,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Panel("Total Non-Liquid: ${rp(led.assets.sumOf { led.value(it) })}") {
             Field(gp, "Harga buyback emas /gram (Rp)") { gp = it }
-            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), System.currentTimeMillis())) } }) {
+            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), Stamp.next())) } }) {
                 Text("Simpan harga emas")
             }
         }
@@ -384,11 +409,11 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
             onSave = { x ->
                 scope.launch {
                     val y = if (x.uid.isEmpty()) x.copy(uid = UUID.randomUUID().toString()) else x
-                    dao.putAsset(y.copy(updated = System.currentTimeMillis()))
+                    dao.putAsset(y.copy(updated = Stamp.next()))
                 }
                 edit = null
             },
-            onDelete = { scope.launch { dao.putAsset(a.copy(deleted = true, updated = System.currentTimeMillis())) }; edit = null },
+            onDelete = { scope.launch { dao.putAsset(a.copy(deleted = true, updated = Stamp.next())) }; edit = null },
             onDismiss = { edit = null }
         )
     }
@@ -456,7 +481,7 @@ fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismi
 // ---------- Laporan ----------
 
 @Composable
-fun Reports(led: Ledger) {
+fun Reports(led: Ledger, onExport: (LocalDate) -> Unit) {
     var yearly by remember { mutableStateOf(false) }
     var year by remember { mutableIntStateOf(2027) }
     val ps = if (yearly) {
@@ -483,7 +508,7 @@ fun Reports(led: Ledger) {
                 OutlinedButton({ year += 1 }) { Text("▶") }
             }
         }
-        ps.forEach { p ->
+        ps.forEachIndexed { i, p ->
             Panel(p.label) {
                 Line("Total Transaksi", "${p.trx} orang")
                 Line("Pemasukan", rp(p.income))
@@ -495,6 +520,11 @@ fun Reports(led: Ledger) {
                 Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
                 Line("Net Worth Akhir", rp(p.netWorth), true)
                 Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
+                if (!yearly) {
+                    OutlinedButton({ onExport(LocalDate.of(year, i + 1, 1)) }, Modifier.fillMaxWidth()) {
+                        Text("⬇ Unduh Excel bulan ini")
+                    }
+                }
             }
         }
     }
@@ -517,7 +547,7 @@ fun SettingsScreen(
         SyncPanel(dao, scope, syncMsg, runSync)
         Panel("Saldo awal saving: ${rp(led.startSaving)}") {
             Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
-            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), System.currentTimeMillis())) } }) {
+            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), Stamp.next())) } }) {
                 Text("Simpan")
             }
         }
@@ -529,7 +559,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("${p.note} · ${p.date}\n${rp(p.amount)}", Modifier.weight(1f))
-                    TextButton({ scope.launch { dao.putPrior(p.copy(deleted = true, updated = System.currentTimeMillis())) } }) { Text("Hapus") }
+                    TextButton({ scope.launch { dao.putPrior(p.copy(deleted = true, updated = Stamp.next())) } }) { Text("Hapus") }
                 }
             }
             Field(note, "Keterangan", false) { note = it }
@@ -537,7 +567,7 @@ fun SettingsScreen(
             Field(amt, "Jumlah (Rp)") { amt = it }
             Button({
                 if (amt.num() > 0L) {
-                    scope.launch { dao.putPrior(Prior(UUID.randomUUID().toString(), note, pd, amt.num(), System.currentTimeMillis())) }
+                    scope.launch { dao.putPrior(Prior(UUID.randomUUID().toString(), note, pd, amt.num(), Stamp.next())) }
                     note = ""; pd = ""; amt = ""
                 }
             }) { Text("Tambah") }
