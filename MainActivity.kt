@@ -1,0 +1,489 @@
+package com.ranum.one
+
+import android.app.DatePickerDialog
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.util.Locale
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val dao = AppDb.get(this).dao()
+        setContent { MaterialTheme { App(dao) } }
+    }
+}
+
+// ---------- Komponen kecil ----------
+
+@Composable
+fun Line(l: String, v: String, bold: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(l, Modifier.weight(1f))
+        Text(v, fontWeight = if (bold) FontWeight.Bold else null)
+    }
+}
+
+@Composable
+fun Panel(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+fun Field(v: String, label: String, num: Boolean = true, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = v,
+        onValueChange = { onChange(if (num) it.filter(Char::isDigit) else it) },
+        label = { Text(label) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = if (num) KeyboardType.Number else KeyboardType.Text),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+    )
+}
+
+@Composable
+fun pickDate(cur: LocalDate, onPick: (LocalDate) -> Unit): () -> Unit {
+    val ctx = LocalContext.current
+    return {
+        DatePickerDialog(
+            ctx,
+            { _, y, m, d -> onPick(LocalDate.of(y, m + 1, d)) },
+            cur.year, cur.monthValue - 1, cur.dayOfMonth
+        ).show()
+    }
+}
+
+fun monthLabel(d: LocalDate): String =
+    d.month.getDisplayName(java.time.format.TextStyle.FULL, Locale("id", "ID")) + " " + d.year
+
+fun Number?.z(): String = if (this == null || this.toLong() == 0L) "" else this.toString()
+
+// ---------- Aplikasi ----------
+
+@Composable
+fun App(dao: AppDao) {
+    val days by dao.dailies().collectAsState(initial = emptyList<Daily>())
+    val assets by dao.assets().collectAsState(initial = emptyList<Asset>())
+    val priors by dao.priors().collectAsState(initial = emptyList<Prior>())
+    val sets by dao.settings().collectAsState(initial = emptyList<Setting>())
+    val gold = sets.firstOrNull { it.k == "gold" }?.v?.toLongOrNull() ?: 0L
+    val other = sets.firstOrNull { it.k == "other" }?.v?.toLongOrNull() ?: 0L
+    val led = remember(days, assets, priors, gold, other) { Ledger(days, assets, priors, gold, other) }
+
+    var tab by remember { mutableIntStateOf(0) }
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var settings by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val names = listOf("Dashboard", "Input", "Riwayat", "Aset", "Laporan")
+    val marks = listOf("📊", "✏️", "🕘", "🪙", "📑")
+
+    Scaffold(bottomBar = {
+        NavigationBar {
+            names.forEachIndexed { i, n ->
+                NavigationBarItem(
+                    selected = tab == i && !settings,
+                    onClick = { tab = i; settings = false },
+                    icon = { Text(marks[i]) },
+                    label = { Text(n, maxLines = 1) }
+                )
+            }
+        }
+    }) { pad ->
+        Box(Modifier.padding(pad).fillMaxSize()) {
+            if (settings) {
+                SettingsScreen(led, dao, scope) { settings = false }
+            } else {
+                when (tab) {
+                    0 -> Dashboard(led) { settings = true }
+                    1 -> InputScreen(led, dao, scope, date) { date = it }
+                    2 -> History(led) { date = it; tab = 1 }
+                    3 -> Assets(led, dao, scope)
+                    else -> Reports(led)
+                }
+            }
+        }
+    }
+}
+
+// ---------- Dashboard ----------
+
+@Composable
+fun Dashboard(led: Ledger, onSettings: () -> Unit) {
+    var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
+    val saving = led.savingBefore(LocalDate.MAX)
+    val nl = led.assets.sumOf { led.value(it) }
+    val p = led.period("", m, m.plusMonths(1))
+    val ratio = if (p.expense == 0L) 0.0 else p.income.toDouble() / p.expense
+
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+        Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("One Roof, One financial Journey")
+        Panel("Ringkasan total") {
+            Line("Total Pemasukan", rp(led.days.sumOf { led.inc(it) }))
+            Line("Total Pengeluaran", rp(led.days.sumOf { led.exp(it) }))
+            Line("Total Saving (Likuid)", rp(saving))
+            Line("Total Non-Liquid Asset", rp(nl))
+            Line("TOTAL NET WORTH", rp(saving + nl), true)
+        }
+        Panel("Indikator bulan") {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton({ m = m.minusMonths(1) }) { Text("◀") }
+                Text(monthLabel(m), fontWeight = FontWeight.Bold)
+                OutlinedButton({ m = m.plusMonths(1) }) { Text("▶") }
+            }
+            Line("Pemasukan bulan ini", rp(p.income))
+            Line("Pengeluaran bulan ini", rp(p.expense))
+            Line("Selisih operasional", rp(p.diff))
+            Line("Persentase saving dari pemasukan", "%.1f%%".format(p.pct))
+            Line("Rasio pemasukan : pengeluaran", "%.2f x".format(ratio))
+            Line("Dana pindah ke aset baru", rp(p.newAsset))
+        }
+        OutlinedButton(onSettings, Modifier.fillMaxWidth()) { Text("Pengaturan & saldo awal") }
+        Spacer(Modifier.height(8.dp))
+        Text("Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.")
+    }
+}
+
+// ---------- Input Harian ----------
+
+@Composable
+fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate, onDate: (LocalDate) -> Unit) {
+    val cur = led.days.firstOrNull { it.date == date.toEpochDay() }
+    val f = remember(date, cur) {
+        mutableStateListOf(
+            cur?.o1.z(), cur?.o2.z(), cur?.fuel.z(),
+            cur?.income.z(), cur?.incomeOther.z(), cur?.noteIn ?: "",
+            cur?.mandatory.z(), cur?.otherExp.z(), cur?.noteExp ?: "",
+            cur?.bop.z()
+        )
+    }
+    var msg by remember(date) { mutableStateOf("") }
+    val pick = pickDate(date, onDate)
+    val labels = listOf(
+        "TRX Outlet 1 (orang)", "TRX Outlet 2 (orang)", "TRX Fuel (orang)",
+        "Pemasukan (Rp)", "Pemasukan Lain (Rp)", "Keterangan Pemasukan Lain",
+        "Pengeluaran Wajib (Rp)", "Pengeluaran Lain (Rp)", "Keterangan Pengeluaran Lain",
+        "BOP Toko (Rp)"
+    )
+    val inc = f[3].num() + f[4].num()
+    val exp = f[6].num() + f[7].num() + f[9].num()
+
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton({ onDate(date.minusDays(1)) }) { Text("◀") }
+            TextButton(pick) { Text(date.toString(), fontWeight = FontWeight.Bold) }
+            OutlinedButton({ onDate(date.plusDays(1)) }) { Text("▶") }
+        }
+        TextButton({ onDate(LocalDate.now()) }) { Text("Ke hari ini") }
+        labels.forEachIndexed { i, l ->
+            Field(f[i], l, num = !(i == 5 || i == 8)) { f[i] = it }
+        }
+        Panel("Hitungan otomatis") {
+            Line("Total Transaksi", "${f[0].num() + f[1].num() + f[2].num()} orang")
+            Line("Total Pemasukan", rp(inc))
+            Line("Total Pengeluaran", rp(exp))
+            Line("Perubahan Saving Harian", rp(inc - exp), true)
+        }
+        Button(
+            onClick = {
+                scope.launch {
+                    dao.putDaily(
+                        Daily(
+                            date.toEpochDay(),
+                            f[0].num().toInt(), f[1].num().toInt(), f[2].num().toInt(),
+                            f[3].num(), f[4].num(), f[5],
+                            f[6].num(), f[7].num(), f[8],
+                            f[9].num()
+                        )
+                    )
+                    msg = "Tersimpan ✓"
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Simpan") }
+        if (msg.isNotEmpty()) Text(msg)
+        if (cur != null) {
+            TextButton({ scope.launch { dao.delDaily(cur.date) } }) { Text("Hapus data tanggal ini") }
+        }
+    }
+}
+
+// ---------- Riwayat ----------
+
+@Composable
+fun History(led: Ledger, onOpen: (LocalDate) -> Unit) {
+    if (led.days.isEmpty()) {
+        Text("Belum ada data harian.", Modifier.padding(16.dp))
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(led.days.reversed()) { d ->
+            Column(
+                Modifier.fillMaxWidth()
+                    .clickable { onOpen(LocalDate.ofEpochDay(d.date)) }
+                    .padding(12.dp)
+            ) {
+                Text(LocalDate.ofEpochDay(d.date).toString(), fontWeight = FontWeight.Bold)
+                Text("Masuk ${rp(led.inc(d))} · Keluar ${rp(led.exp(d))}")
+                Text("Saving ${rp(led.inc(d) - led.exp(d))} · Transaksi ${d.o1 + d.o2 + d.fuel} orang")
+            }
+            HorizontalDivider()
+        }
+    }
+}
+
+// ---------- Non-Liquid Asset ----------
+
+@Composable
+fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
+    var gp by remember(led.goldPrice) { mutableStateOf(led.goldPrice.toString()) }
+    var edit by remember { mutableStateOf<Asset?>(null) }
+
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+        Panel("Total Non-Liquid: ${rp(led.assets.sumOf { led.value(it) })}") {
+            Field(gp, "Harga buyback emas /gram (Rp)") { gp = it }
+            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString())) } }) {
+                Text("Simpan harga emas")
+            }
+        }
+        led.assets.forEach { a ->
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { edit = a }) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("${a.name} (${a.type})", fontWeight = FontWeight.Bold)
+                    Text("${a.weight} gr · beli ${rp(a.price)} · ${LocalDate.ofEpochDay(a.date)}")
+                    Text("Nilai ${rp(led.value(a))} · ${if (a.baru) "Aset Baru" else "Aset Lama"}")
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = {
+                edit = Asset(
+                    name = "", type = "Gold Bar", weight = 0.0, price = 0,
+                    date = LocalDate.now().toEpochDay(), baru = false, gold = true
+                )
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("+ Tambah aset") }
+    }
+
+    edit?.let { a ->
+        AssetDialog(
+            a,
+            onSave = { scope.launch { dao.putAsset(it) }; edit = null },
+            onDelete = { scope.launch { dao.delAsset(a) }; edit = null },
+            onDismiss = { edit = null }
+        )
+    }
+}
+
+@Composable
+fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf(a.name) }
+    var type by remember { mutableStateOf(a.type) }
+    var w by remember { mutableStateOf(if (a.weight == 0.0) "" else a.weight.toString()) }
+    var price by remember { mutableStateOf(if (a.price == 0L) "" else a.price.toString()) }
+    var date by remember { mutableStateOf(LocalDate.ofEpochDay(a.date)) }
+    var baru by remember { mutableStateOf(a.baru) }
+    var gold by remember { mutableStateOf(a.gold) }
+    val pick = pickDate(date) { date = it }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (a.id == 0L) "Tambah aset" else "Ubah aset") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Field(name, "Nama aset", false) { name = it }
+                Field(type, "Jenis aset (Gold Bar, Ring, ...)", false) { type = it }
+                OutlinedTextField(
+                    value = w,
+                    onValueChange = { s -> w = s.filter { c -> c.isDigit() || c == '.' || c == ',' } },
+                    label = { Text("Berat (gram)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                )
+                Field(price, "Harga beli (Rp)") { price = it }
+                OutlinedButton(pick) { Text("Tanggal: $date") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(baru, { baru = it })
+                    Text("Aset Baru (dibeli dari saving)")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(gold, { gold = it })
+                    Text("Dinilai dari harga emas (berat × harga/gram)")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton({
+                onSave(
+                    a.copy(
+                        name = name, type = type,
+                        weight = w.replace(',', '.').toDoubleOrNull() ?: 0.0,
+                        price = price.num(), date = date.toEpochDay(),
+                        baru = baru, gold = gold
+                    )
+                )
+            }) { Text("Simpan") }
+        },
+        dismissButton = {
+            Row {
+                if (a.id != 0L) TextButton(onDelete) { Text("Hapus") }
+                TextButton(onDismiss) { Text("Batal") }
+            }
+        }
+    )
+}
+
+// ---------- Laporan ----------
+
+@Composable
+fun Reports(led: Ledger) {
+    var yearly by remember { mutableStateOf(false) }
+    var year by remember { mutableIntStateOf(2027) }
+    val ps = if (yearly) {
+        (2027..2031).map { led.period("$it", LocalDate.of(it, 1, 1), LocalDate.of(it + 1, 1, 1)) }
+    } else {
+        (1..12).map {
+            val s = LocalDate.of(year, it, 1)
+            led.period(monthLabel(s), s, s.plusMonths(1))
+        }
+    }
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (yearly) OutlinedButton({ yearly = false }) { Text("Bulanan") } else Button({ yearly = false }) { Text("Bulanan") }
+            if (yearly) Button({ yearly = true }) { Text("Tahunan") } else OutlinedButton({ yearly = true }) { Text("Tahunan") }
+        }
+        if (!yearly) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton({ year -= 1 }) { Text("◀") }
+                Text("$year", fontWeight = FontWeight.Bold)
+                OutlinedButton({ year += 1 }) { Text("▶") }
+            }
+        }
+        ps.forEach { p ->
+            Panel(p.label) {
+                Line("Total Transaksi", "${p.trx} orang")
+                Line("Pemasukan", rp(p.income))
+                Line("Pengeluaran", rp(p.expense))
+                Line("Selisih Operasional", rp(p.diff))
+                Line("Pembelian Aset Baru", rp(p.newAsset))
+                Line("Perubahan Saving", rp(p.savingChange))
+                Line("Saving Akhir", rp(p.savingEnd))
+                Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
+                Line("Net Worth Akhir", rp(p.netWorth), true)
+                Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
+            }
+        }
+    }
+}
+
+// ---------- Pengaturan ----------
+
+@Composable
+fun SettingsScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, onBack: () -> Unit) {
+    var other by remember(led.otherSaving) { mutableStateOf(led.otherSaving.toString()) }
+    var note by remember { mutableStateOf("") }
+    var pd by remember { mutableStateOf("") }
+    var amt by remember { mutableStateOf("") }
+
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+        OutlinedButton(onBack) { Text("◀ Kembali") }
+        Panel("Saldo awal saving: ${rp(led.startSaving)}") {
+            Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
+            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString())) } }) {
+                Text("Simpan")
+            }
+        }
+        Panel("Sisa hasil usaha sebelumnya") {
+            led.priors.forEach { p ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("${p.note} · ${p.date}\n${rp(p.amount)}", Modifier.weight(1f))
+                    TextButton({ scope.launch { dao.delPrior(p) } }) { Text("Hapus") }
+                }
+            }
+            Field(note, "Keterangan", false) { note = it }
+            Field(pd, "Tanggal / periode", false) { pd = it }
+            Field(amt, "Jumlah (Rp)") { amt = it }
+            Button({
+                if (amt.num() > 0L) {
+                    scope.launch { dao.putPrior(Prior(note = note, date = pd, amount = amt.num())) }
+                    note = ""; pd = ""; amt = ""
+                }
+            }) { Text("Tambah") }
+        }
+    }
+}
