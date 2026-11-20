@@ -200,7 +200,14 @@ fun App(dao: AppDao) {
                 SettingsScreen(led, dao, scope, syncMsg, runSync) { settings = false }
             } else {
                 when (tab) {
-                    0 -> Dashboard(led) { settings = true }
+                    0 -> Dashboard(
+                        led, syncMsg,
+                        onSync = {
+                            val u = prefs(ctx).getString("uri", null)
+                            if (u != null) runSync(Uri.parse(u), null, true) else settings = true
+                        },
+                        onSettings = { settings = true }
+                    )
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
                     3 -> Assets(led, dao, scope)
@@ -236,7 +243,7 @@ fun App(dao: AppDao) {
 // ---------- Dashboard ----------
 
 @Composable
-fun Dashboard(led: Ledger, onSettings: () -> Unit) {
+fun Dashboard(led: Ledger, syncMsg: String, onSync: () -> Unit, onSettings: () -> Unit) {
     var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
@@ -244,8 +251,18 @@ fun Dashboard(led: Ledger, onSettings: () -> Unit) {
     val ratio = if (p.expense == 0L) 0.0 else p.income.toDouble() / p.expense
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
-        Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text("One Roof, One financial Journey")
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("One Roof, One financial Journey")
+            }
+            Button(onSync) { Text("🔄 Sinkron") }
+        }
+        if (syncMsg.isNotEmpty()) Text(syncMsg, style = MaterialTheme.typography.bodySmall)
         Panel("Ringkasan total") {
             Line("Total Pemasukan", rp(led.days.sumOf { led.inc(it) }))
             Line("Total Pengeluaran", rp(led.days.sumOf { led.exp(it) }))
