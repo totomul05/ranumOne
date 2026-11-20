@@ -227,7 +227,11 @@ suspend fun doSync(ctx: Context, dao: AppDao, uri: Uri, policy: Policy?, write: 
 
             if (conflicts.isNotEmpty()) return@withContext SyncResult.Conflicts(conflicts, uri, write)
 
-            toLocal.forEach { applyLocal(dao, it) }
+            // Lewati catatan yang diubah pengguna selagi sinkron berjalan; akan dirapikan pada sinkron berikutnya
+            val fresh = if (toLocal.isEmpty()) local else snapshot(dao)
+            toLocal.forEach { r ->
+                if (fresh[r.key]?.json?.toString() == local[r.key]?.json?.toString()) applyLocal(dao, r)
+            }
             val pushed = merged.values.count { remote[it.key]?.json?.toString() != it.json.toString() }
             var warn = ""
             if (write) {

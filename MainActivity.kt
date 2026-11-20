@@ -29,6 +29,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -39,6 +41,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -53,19 +56,50 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.util.Locale
 import java.util.UUID
+
+val Green = Color(0xFF1B5E20)
+val GreenMid = Color(0xFF2E7D32)
+val GreenSoft = Color(0xFFE8F5E9)
+val Gold = Color(0xFFFFC107)
+val GoldSoft = Color(0xFFFFF8E1)
+val GoldInk = Color(0xFF3E2C00)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val dao = AppDb.get(this).dao()
         Stamp.see(prefs(this).getLong("seen", 0L))
-        setContent { MaterialTheme { App(dao) } }
+        setContent {
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    primary = Green, onPrimary = Color.White,
+                    primaryContainer = GreenSoft, onPrimaryContainer = Green,
+                    secondary = Gold, onSecondary = GoldInk,
+                    secondaryContainer = Color(0xFFFFE082), onSecondaryContainer = GoldInk,
+                    background = Color(0xFFFFFDF7), surface = Color(0xFFFFFDF7),
+                    surfaceContainer = GoldSoft, surfaceContainerHighest = GreenSoft
+                )
+            ) { App(dao) }
+        }
     }
 }
 
@@ -84,9 +118,12 @@ fun Line(l: String, v: String, bold: Boolean = false) {
 
 @Composable
 fun Panel(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = GreenSoft)
+    ) {
         Column(Modifier.padding(12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Green)
             Spacer(Modifier.height(6.dp))
             content()
         }
@@ -120,6 +157,13 @@ fun pickDate(cur: LocalDate, onPick: (LocalDate) -> Unit): () -> Unit {
 fun monthLabel(d: LocalDate): String =
     d.month.getDisplayName(java.time.format.TextStyle.FULL, Locale("id", "ID")) + " " + d.year
 
+fun dailyFields(c: Daily?): List<String> = listOf(
+    c?.o1.z(), c?.o2.z(), c?.fuel.z(),
+    c?.income.z(), c?.incomeOther.z(), c?.noteIn ?: "",
+    c?.mandatory.z(), c?.otherExp.z(), c?.noteExp ?: "",
+    c?.bop.z()
+)
+
 fun Number?.z(): String = if (this == null || this.toLong() == 0L) "" else this.toString()
 
 // ---------- Aplikasi ----------
@@ -146,6 +190,8 @@ fun App(dao: AppDao) {
     var date by remember { mutableStateOf(LocalDate.now()) }
     var settings by remember { mutableStateOf(false) }
     var syncMsg by remember { mutableStateOf("") }
+    // 0 abu-abu: belum terhubung, 1 kuning: sedang/menunggu, 2 hijau: tersinkron, 3 merah: gagal
+    var syncState by remember { mutableIntStateOf(if (prefs(ctx).getString("uri", null) != null) 1 else 0) }
     var conflict by remember { mutableStateOf<SyncResult.Conflicts?>(null) }
     var exportMonth by remember { mutableStateOf<LocalDate?>(null) }
 
@@ -165,19 +211,47 @@ fun App(dao: AppDao) {
         xlsx.launch("ranumOne-%d-%02d.xlsx".format(m.year, m.monthValue))
     }
 
-    val runSync: (Uri, Policy?, Boolean) -> Unit = { uri, policy, write ->
+    var busy by remember { mutableStateOf(false) }
+    var foreground by remember { mutableStateOf(true) }
+
+    fun syncCore(uri: Uri, policy: Policy?, write: Boolean, silent: Boolean) {
+        if (busy && policy == null) {
+            if (!silent) syncMsg = "Sedang menyinkronkan, coba lagi sebentar."
+            return
+        }
+        busy = true
         scope.launch {
-            syncMsg = "Menyinkronkan..."
-            when (val r = doSync(ctx, dao, uri, policy, write)) {
-                is SyncResult.Done -> { syncMsg = r.msg; conflict = null }
-                is SyncResult.Fail -> syncMsg = r.msg
-                is SyncResult.Conflicts -> { conflict = r; syncMsg = "Ada konflik data, pilih versi yang dipakai." }
+            try {
+                if (!silent) { syncMsg = "Menyinkronkan..."; syncState = 1 }
+                when (val r = doSync(ctx, dao, uri, policy, write)) {
+                    is SyncResult.Done -> { syncMsg = r.msg; conflict = null; syncState = 2 }
+                    is SyncResult.Fail -> { syncMsg = r.msg; syncState = 3 }
+                    is SyncResult.Conflicts -> { conflict = r; syncMsg = "Ada konflik data, pilih versi yang dipakai."; syncState = 1 }
+                }
+            } finally {
+                busy = false
             }
         }
     }
-    LaunchedEffect(Unit) {
-        val u = prefs(ctx).getString("uri", null)
-        if (u != null) runSync(Uri.parse(u), null, true)
+    val runSync: (Uri, Policy?, Boolean) -> Unit = { uri, policy, write -> syncCore(uri, policy, write, false) }
+
+    // Sinkron otomatis hanya berjalan saat aplikasi terbuka di layar
+    DisposableEffect(Unit) {
+        val lc = (ctx as ComponentActivity).lifecycle
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_START) foreground = true
+            if (e == Lifecycle.Event.ON_STOP) foreground = false
+        }
+        lc.addObserver(obs)
+        onDispose { lc.removeObserver(obs) }
+    }
+    LaunchedEffect(foreground) {
+        while (foreground) {
+            val u = prefs(ctx).getString("uri", null)
+            if (u == null) syncState = 0
+            if (u != null && !busy && conflict == null) syncCore(Uri.parse(u), null, true, true)
+            delay(10_000)
+        }
     }
 
     val names = listOf("Dashboard", "Input", "Riwayat", "Aset", "Laporan")
@@ -201,7 +275,7 @@ fun App(dao: AppDao) {
             } else {
                 when (tab) {
                     0 -> Dashboard(
-                        led, syncMsg,
+                        led, syncState,
                         onSync = {
                             val u = prefs(ctx).getString("uri", null)
                             if (u != null) runSync(Uri.parse(u), null, true) else settings = true
@@ -243,33 +317,68 @@ fun App(dao: AppDao) {
 // ---------- Dashboard ----------
 
 @Composable
-fun Dashboard(led: Ledger, syncMsg: String, onSync: () -> Unit, onSettings: () -> Unit) {
+fun StatCard(title: String, value: String, bg: Color, fg: Color, modifier: Modifier) {
+    Card(modifier, colors = CardDefaults.cardColors(containerColor = bg)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = fg)
+            Spacer(Modifier.height(4.dp))
+            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = fg)
+        }
+    }
+}
+
+@Composable
+fun Dashboard(led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () -> Unit) {
     var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
+    val tin = led.days.sumOf { led.inc(it) }
+    val tout = led.days.sumOf { led.exp(it) }
     val p = led.period("", m, m.plusMonths(1))
     val ratio = if (p.expense == 0L) 0.0 else p.income.toDouble() / p.expense
+    val mx = maxOf(p.income, p.expense, 1L).toFloat()
+    val dot = when (syncState) {
+        1 -> Color(0xFFFFC107)
+        2 -> Color(0xFF43A047)
+        3 -> Color(0xFFE53935)
+        else -> Color(0xFF9E9E9E)
+    }
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text("One Roof, One financial Journey")
+                Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Green)
+                Text("One Roof, One financial Journey", style = MaterialTheme.typography.bodySmall)
             }
-            Button(onSync) { Text("🔄 Sinkron") }
+            Box(Modifier.size(12.dp).background(dot, CircleShape))
+            Spacer(Modifier.width(8.dp))
+            Button(onSync, colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) {
+                Text("🔄 Sinkron")
+            }
         }
-        if (syncMsg.isNotEmpty()) Text(syncMsg, style = MaterialTheme.typography.bodySmall)
-        Panel("Ringkasan total") {
-            Line("Total Pemasukan", rp(led.days.sumOf { led.inc(it) }))
-            Line("Total Pengeluaran", rp(led.days.sumOf { led.exp(it) }))
-            Line("Total Saving (Likuid)", rp(saving))
-            Line("Total Non-Liquid Asset", rp(nl))
-            Line("TOTAL NET WORTH", rp(saving + nl), true)
+        Spacer(Modifier.height(12.dp))
+        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Green)) {
+            Column(Modifier.padding(16.dp)) {
+                Text("TOTAL NET WORTH", style = MaterialTheme.typography.labelLarge, color = Gold)
+                Text(rp(saving + nl), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                Text("Saving likuid + aset non-liquid", style = MaterialTheme.typography.bodySmall, color = GreenSoft)
+            }
         }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatCard("Saving (Likuid)", rp(saving), GreenSoft, Green, Modifier.weight(1f))
+            StatCard("Non-Liquid Asset", rp(nl), GoldSoft, GoldInk, Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatCard("Total Pemasukan", rp(tin), GreenSoft, Green, Modifier.weight(1f))
+            StatCard("Total Pengeluaran", rp(tout), Color(0xFFFFF3E0), Color(0xFF8D4B00), Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(8.dp))
         Panel("Indikator bulan") {
             Row(
                 Modifier.fillMaxWidth(),
@@ -281,15 +390,36 @@ fun Dashboard(led: Ledger, syncMsg: String, onSync: () -> Unit, onSettings: () -
                 OutlinedButton({ m = m.plusMonths(1) }) { Text("▶") }
             }
             Line("Pemasukan bulan ini", rp(p.income))
+            LinearProgressIndicator(
+                progress = { p.income.toFloat() / mx },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = GreenMid, trackColor = Color.White
+            )
+            Spacer(Modifier.height(6.dp))
             Line("Pengeluaran bulan ini", rp(p.expense))
-            Line("Selisih operasional", rp(p.diff))
+            LinearProgressIndicator(
+                progress = { p.expense.toFloat() / mx },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = Gold, trackColor = Color.White
+            )
+            Spacer(Modifier.height(6.dp))
+            Line("Selisih operasional", rp(p.diff), true)
             Line("Persentase saving dari pemasukan", "%.1f%%".format(p.pct))
+            LinearProgressIndicator(
+                progress = { (p.pct / 100.0).coerceIn(0.0, 1.0).toFloat() },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = Gold, trackColor = Color.White
+            )
+            Spacer(Modifier.height(6.dp))
             Line("Rasio pemasukan : pengeluaran", "%.2f x".format(ratio))
             Line("Dana pindah ke aset baru", rp(p.newAsset))
         }
-        OutlinedButton(onSettings, Modifier.fillMaxWidth()) { Text("Pengaturan & saldo awal") }
+        OutlinedButton(onSettings, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Pengaturan & saldo awal") }
         Spacer(Modifier.height(8.dp))
-        Text("Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.")
+        Text(
+            "Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.",
+            style = MaterialTheme.typography.bodySmall
+        )
     }
 }
 
@@ -298,13 +428,15 @@ fun Dashboard(led: Ledger, syncMsg: String, onSync: () -> Unit, onSettings: () -
 @Composable
 fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate, onDate: (LocalDate) -> Unit) {
     val cur = led.days.firstOrNull { it.date == date.toEpochDay() }
-    val f = remember(date, cur) {
-        mutableStateListOf(
-            cur?.o1.z(), cur?.o2.z(), cur?.fuel.z(),
-            cur?.income.z(), cur?.incomeOther.z(), cur?.noteIn ?: "",
-            cur?.mandatory.z(), cur?.otherExp.z(), cur?.noteExp ?: "",
-            cur?.bop.z()
-        )
+    val f = remember(date) { mutableStateListOf<String>().apply { addAll(dailyFields(cur)) } }
+    var dirty by remember(date) { mutableStateOf(false) }
+    var base by remember(date) { mutableStateOf(cur) }
+    LaunchedEffect(date, cur) {
+        if (!dirty) {
+            base = cur
+            val n = dailyFields(cur)
+            for (i in n.indices) f[i] = n[i]
+        }
     }
     var msg by remember(date) { mutableStateOf("") }
     val pick = pickDate(date, onDate)
@@ -329,7 +461,10 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
         }
         TextButton({ onDate(LocalDate.now()) }) { Text("Ke hari ini") }
         labels.forEachIndexed { i, l ->
-            Field(f[i], l, num = !(i == 5 || i == 8)) { f[i] = it }
+            Field(f[i], l, num = !(i == 5 || i == 8)) { f[i] = it; dirty = true }
+        }
+        if (dirty && cur != base) {
+            Text("⚠ Data tanggal ini baru diubah dari perangkat lain. Menyimpan akan menimpanya.")
         }
         Panel("Hitungan otomatis") {
             Line("Total Transaksi", "${f[0].num() + f[1].num() + f[2].num()} orang")
@@ -349,6 +484,7 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
                             f[9].num(), Stamp.next(), false
                         )
                     )
+                    dirty = false
                     msg = "Tersimpan ✓"
                 }
             },
@@ -500,19 +636,29 @@ fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismi
 @Composable
 fun Reports(led: Ledger, onExport: (LocalDate) -> Unit) {
     var yearly by remember { mutableStateOf(false) }
-    var year by remember { mutableIntStateOf(2027) }
-    val ps = if (yearly) {
-        (2027..2031).map { led.period("$it", LocalDate.of(it, 1, 1), LocalDate.of(it + 1, 1, 1)) }
+    var month by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
+    var menu by remember { mutableStateOf(false) }
+    val year = month.year
+    val p = if (yearly) {
+        led.period("Tahun $year", LocalDate.of(year, 1, 1), LocalDate.of(year + 1, 1, 1))
     } else {
-        (1..12).map {
-            val s = LocalDate.of(year, it, 1)
-            led.period(monthLabel(s), s, s.plusMonths(1))
-        }
+        led.period(monthLabel(month), month, month.plusMonths(1))
     }
+
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (yearly) OutlinedButton({ yearly = false }) { Text("Bulanan") } else Button({ yearly = false }) { Text("Bulanan") }
             if (yearly) Button({ yearly = true }) { Text("Tahunan") } else OutlinedButton({ yearly = true }) { Text("Tahunan") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton({ month = month.minusYears(1) }) { Text("◀") }
+            Text("Tahun $year", fontWeight = FontWeight.Bold)
+            OutlinedButton({ month = month.plusYears(1) }) { Text("▶") }
         }
         if (!yearly) {
             Row(
@@ -520,30 +666,74 @@ fun Reports(led: Ledger, onExport: (LocalDate) -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton({ year -= 1 }) { Text("◀") }
-                Text("$year", fontWeight = FontWeight.Bold)
-                OutlinedButton({ year += 1 }) { Text("▶") }
+                OutlinedButton({ month = month.minusMonths(1) }) { Text("◀") }
+                Box {
+                    TextButton({ menu = true }) {
+                        Text(monthLabel(month).substringBefore(" ") + " ▾", fontWeight = FontWeight.Bold)
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        (1..12).forEach { mth ->
+                            DropdownMenuItem(
+                                text = { Text(monthLabel(LocalDate.of(year, mth, 1)).substringBefore(" ")) },
+                                onClick = { month = LocalDate.of(year, mth, 1); menu = false }
+                            )
+                        }
+                    }
+                }
+                OutlinedButton({ month = month.plusMonths(1) }) { Text("▶") }
             }
         }
-        ps.forEachIndexed { i, p ->
-            Panel(p.label) {
-                Line("Total Transaksi", "${p.trx} orang")
-                Line("Pemasukan", rp(p.income))
-                Line("Pengeluaran", rp(p.expense))
-                Line("Selisih Operasional", rp(p.diff))
-                Line("Pembelian Aset Baru", rp(p.newAsset))
-                Line("Perubahan Saving", rp(p.savingChange))
-                Line("Saving Akhir", rp(p.savingEnd))
-                Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
-                Line("Net Worth Akhir", rp(p.netWorth), true)
-                Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
-                if (!yearly) {
-                    OutlinedButton({ onExport(LocalDate.of(year, i + 1, 1)) }, Modifier.fillMaxWidth()) {
-                        Text("⬇ Unduh Excel bulan ini")
-                    }
+        TextButton({ month = LocalDate.now().withDayOfMonth(1) }) {
+            Text(if (yearly) "Ke tahun ini" else "Ke bulan ini")
+        }
+        Panel(p.label) {
+            Line("Total Transaksi", "${p.trx} orang")
+            Line("Pemasukan", rp(p.income))
+            Line("Pengeluaran", rp(p.expense))
+            Line("Selisih Operasional", rp(p.diff))
+            Line("Pembelian Aset Baru", rp(p.newAsset))
+            Line("Perubahan Saving", rp(p.savingChange))
+            Line("Saving Akhir", rp(p.savingEnd))
+            Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
+            Line("Net Worth Akhir", rp(p.netWorth), true)
+            Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
+            if (!yearly) {
+                OutlinedButton({ onExport(month) }, Modifier.fillMaxWidth()) {
+                    Text("⬇ Unduh Excel bulan ini")
                 }
             }
         }
+        if (yearly) {
+            val rows = (1..12).map {
+                val s = LocalDate.of(year, it, 1)
+                s to led.period("", s, s.plusMonths(1))
+            }
+            Panel("Rincian per bulan $year") {
+                Cols("Bulan", "Pemasukan", "Pengeluaran", "Selisih", true)
+                rows.forEach { (s, q) ->
+                    Cols(
+                        monthLabel(s).substringBefore(" ").take(3),
+                        plain(q.income), plain(q.expense), plain(q.diff)
+                    )
+                }
+                HorizontalDivider()
+                Cols("Total", plain(rows.sumOf { it.second.income }), plain(rows.sumOf { it.second.expense }), plain(rows.sumOf { it.second.diff }), true)
+            }
+        }
+    }
+}
+
+fun plain(v: Long): String = rp(v).replace("Rp", "")
+
+@Composable
+fun Cols(a: String, b: String, c: String, d: String, bold: Boolean = false) {
+    val st = MaterialTheme.typography.bodySmall
+    val w = if (bold) FontWeight.Bold else null
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(a, modifier = Modifier.weight(0.8f), style = st, fontWeight = w)
+        Text(b, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
+        Text(c, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
+        Text(d, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
     }
 }
 
@@ -623,7 +813,7 @@ fun SyncPanel(dao: AppDao, scope: CoroutineScope, msg: String, runSync: (Uri, Po
     }
 
     Panel("Sinkronisasi OneDrive") {
-        Text(if (linked != null) "File data sudah terhubung." else "Belum terhubung ke file OneDrive.")
+        Text(if (linked != null) "File data sudah terhubung. Sinkron otomatis tiap 10 detik saat aplikasi terbuka." else "Belum terhubung ke file OneDrive/Drive.")
         if (msg.isNotEmpty()) Text(msg)
         if (info.isNotEmpty()) Text(info)
         Spacer(Modifier.height(6.dp))
