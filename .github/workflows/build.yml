@@ -14,7 +14,7 @@ jobs:
           mkdir -p app/src/main/res/drawable app/src/main/res/values app/src/main/res/mipmap-anydpi-v26
           mv AndroidManifest.xml app/src/main/
           mv app.build.gradle.kts app/build.gradle.kts
-          mv Data.kt Logic.kt MainActivity.kt app/src/main/java/com/ranum/one/
+          mv *.kt app/src/main/java/com/ranum/one/
           mv ic_launcher_foreground.xml app/src/main/res/drawable/
           mv colors.xml app/src/main/res/values/
           mv ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/
