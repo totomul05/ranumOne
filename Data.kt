@@ -3,7 +3,6 @@ package com.ranum.one
 import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
-import androidx.room.Delete
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -12,6 +11,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
+
+// Setiap catatan punya waktu ubah (updated) dan penanda hapus (deleted) agar bisa disinkronkan antar perangkat.
 
 @Entity(tableName = "daily")
 data class Daily(
@@ -25,47 +26,58 @@ data class Daily(
     val mandatory: Long = 0,
     val otherExp: Long = 0,
     val noteExp: String = "",
-    val bop: Long = 0
+    val bop: Long = 0,
+    val updated: Long = 0,
+    val deleted: Boolean = false
 )
 
 @Entity(tableName = "asset")
 data class Asset(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @PrimaryKey val uid: String,
     val name: String,
     val type: String,
     val weight: Double,
     val price: Long,
     val date: Long,
     val baru: Boolean,
-    val gold: Boolean
+    val gold: Boolean,
+    val updated: Long = 0,
+    val deleted: Boolean = false
 )
 
 @Entity(tableName = "prior")
 data class Prior(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @PrimaryKey val uid: String,
     val note: String,
     val date: String,
-    val amount: Long
+    val amount: Long,
+    val updated: Long = 0,
+    val deleted: Boolean = false
 )
 
 @Entity(tableName = "setting")
-data class Setting(@PrimaryKey val k: String, val v: String)
+data class Setting(
+    @PrimaryKey val k: String,
+    val v: String,
+    val updated: Long = 0
+)
 
 @Dao
 interface AppDao {
-    @Query("SELECT * FROM daily ORDER BY date") fun dailies(): Flow<List<Daily>>
+    @Query("SELECT * FROM daily WHERE deleted = 0 ORDER BY date") fun dailies(): Flow<List<Daily>>
+    @Query("SELECT * FROM daily") suspend fun allDaily(): List<Daily>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putDaily(d: Daily)
-    @Query("DELETE FROM daily WHERE date = :d") suspend fun delDaily(d: Long)
 
-    @Query("SELECT * FROM asset ORDER BY date") fun assets(): Flow<List<Asset>>
+    @Query("SELECT * FROM asset WHERE deleted = 0 ORDER BY date") fun assets(): Flow<List<Asset>>
+    @Query("SELECT * FROM asset") suspend fun allAsset(): List<Asset>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putAsset(a: Asset)
-    @Delete suspend fun delAsset(a: Asset)
 
-    @Query("SELECT * FROM prior ORDER BY id") fun priors(): Flow<List<Prior>>
+    @Query("SELECT * FROM prior WHERE deleted = 0 ORDER BY updated") fun priors(): Flow<List<Prior>>
+    @Query("SELECT * FROM prior") suspend fun allPrior(): List<Prior>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putPrior(p: Prior)
-    @Delete suspend fun delPrior(p: Prior)
 
     @Query("SELECT * FROM setting") fun settings(): Flow<List<Setting>>
+    @Query("SELECT * FROM setting") suspend fun allSetting(): List<Setting>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putSetting(s: Setting)
 }
 
@@ -80,7 +92,7 @@ abstract class AppDb : RoomDatabase() {
     companion object {
         @Volatile private var inst: AppDb? = null
         fun get(c: Context): AppDb = inst ?: synchronized(this) {
-            inst ?: Room.databaseBuilder(c.applicationContext, AppDb::class.java, "ranum.db")
+            inst ?: Room.databaseBuilder(c.applicationContext, AppDb::class.java, "ranum2.db")
                 .build().also { inst = it }
         }
     }

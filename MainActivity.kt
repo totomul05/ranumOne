@@ -1,9 +1,13 @@
 package com.ranum.one
 
 import android.app.DatePickerDialog
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,6 +38,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -52,6 +57,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.util.Locale
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -126,10 +132,29 @@ fun App(dao: AppDao) {
     val other = sets.firstOrNull { it.k == "other" }?.v?.toLongOrNull() ?: 0L
     val led = remember(days, assets, priors, gold, other) { Ledger(days, assets, priors, gold, other) }
 
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var settings by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+    var syncMsg by remember { mutableStateOf("") }
+    var conflict by remember { mutableStateOf<SyncResult.Conflicts?>(null) }
+
+    val runSync: (Uri, Policy?, Boolean) -> Unit = { uri, policy, write ->
+        scope.launch {
+            syncMsg = "Menyinkronkan..."
+            when (val r = doSync(ctx, dao, uri, policy, write)) {
+                is SyncResult.Done -> { syncMsg = r.msg; conflict = null }
+                is SyncResult.Fail -> syncMsg = r.msg
+                is SyncResult.Conflicts -> { conflict = r; syncMsg = "Ada konflik data, pilih versi yang dipakai." }
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        val u = prefs(ctx).getString("uri", null)
+        if (u != null) runSync(Uri.parse(u), null, true)
+    }
+
     val names = listOf("Dashboard", "Input", "Riwayat", "Aset", "Laporan")
     val marks = listOf("📊", "✏️", "🕘", "🪙", "📑")
 
@@ -147,7 +172,7 @@ fun App(dao: AppDao) {
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             if (settings) {
-                SettingsScreen(led, dao, scope) { settings = false }
+                SettingsScreen(led, dao, scope, syncMsg, runSync) { settings = false }
             } else {
                 when (tab) {
                     0 -> Dashboard(led) { settings = true }
@@ -158,6 +183,28 @@ fun App(dao: AppDao) {
                 }
             }
         }
+    }
+
+    conflict?.let { c ->
+        AlertDialog(
+            onDismissRequest = { conflict = null },
+            title = { Text("Konflik data (${c.lines.size})") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Data berikut diubah di dua perangkat sejak sinkron terakhir. Pilih versi yang dipakai untuk semuanya:")
+                    Spacer(Modifier.height(8.dp))
+                    c.lines.take(10).forEach { Text(it); Spacer(Modifier.height(6.dp)) }
+                    if (c.lines.size > 10) Text("...dan ${c.lines.size - 10} lainnya")
+                }
+            },
+            confirmButton = { TextButton({ runSync(c.uri, Policy.LOCAL, c.write) }) { Text("Versi HP") } },
+            dismissButton = {
+                Row {
+                    TextButton({ runSync(c.uri, Policy.REMOTE, c.write) }) { Text("Versi OneDrive") }
+                    TextButton({ conflict = null }) { Text("Batal") }
+                }
+            }
+        )
     }
 }
 
@@ -257,7 +304,7 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
                             f[0].num().toInt(), f[1].num().toInt(), f[2].num().toInt(),
                             f[3].num(), f[4].num(), f[5],
                             f[6].num(), f[7].num(), f[8],
-                            f[9].num()
+                            f[9].num(), System.currentTimeMillis(), false
                         )
                     )
                     msg = "Tersimpan ✓"
@@ -267,7 +314,7 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
         ) { Text("Simpan") }
         if (msg.isNotEmpty()) Text(msg)
         if (cur != null) {
-            TextButton({ scope.launch { dao.delDaily(cur.date) } }) { Text("Hapus data tanggal ini") }
+            TextButton({ scope.launch { dao.putDaily(cur.copy(deleted = true, updated = System.currentTimeMillis())) } }) { Text("Hapus data tanggal ini") }
         }
     }
 }
@@ -306,7 +353,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Panel("Total Non-Liquid: ${rp(led.assets.sumOf { led.value(it) })}") {
             Field(gp, "Harga buyback emas /gram (Rp)") { gp = it }
-            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString())) } }) {
+            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), System.currentTimeMillis())) } }) {
                 Text("Simpan harga emas")
             }
         }
@@ -323,7 +370,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
         Button(
             onClick = {
                 edit = Asset(
-                    name = "", type = "Gold Bar", weight = 0.0, price = 0,
+                    uid = "", name = "", type = "Gold Bar", weight = 0.0, price = 0,
                     date = LocalDate.now().toEpochDay(), baru = false, gold = true
                 )
             },
@@ -334,8 +381,14 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     edit?.let { a ->
         AssetDialog(
             a,
-            onSave = { scope.launch { dao.putAsset(it) }; edit = null },
-            onDelete = { scope.launch { dao.delAsset(a) }; edit = null },
+            onSave = { x ->
+                scope.launch {
+                    val y = if (x.uid.isEmpty()) x.copy(uid = UUID.randomUUID().toString()) else x
+                    dao.putAsset(y.copy(updated = System.currentTimeMillis()))
+                }
+                edit = null
+            },
+            onDelete = { scope.launch { dao.putAsset(a.copy(deleted = true, updated = System.currentTimeMillis())) }; edit = null },
             onDismiss = { edit = null }
         )
     }
@@ -354,7 +407,7 @@ fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismi
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (a.id == 0L) "Tambah aset" else "Ubah aset") },
+        title = { Text(if (a.uid.isEmpty()) "Tambah aset" else "Ubah aset") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Field(name, "Nama aset", false) { name = it }
@@ -393,7 +446,7 @@ fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismi
         },
         dismissButton = {
             Row {
-                if (a.id != 0L) TextButton(onDelete) { Text("Hapus") }
+                if (a.uid.isNotEmpty()) TextButton(onDelete) { Text("Hapus") }
                 TextButton(onDismiss) { Text("Batal") }
             }
         }
@@ -450,7 +503,10 @@ fun Reports(led: Ledger) {
 // ---------- Pengaturan ----------
 
 @Composable
-fun SettingsScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, onBack: () -> Unit) {
+fun SettingsScreen(
+    led: Ledger, dao: AppDao, scope: CoroutineScope,
+    syncMsg: String, runSync: (Uri, Policy?, Boolean) -> Unit, onBack: () -> Unit
+) {
     var other by remember(led.otherSaving) { mutableStateOf(led.otherSaving.toString()) }
     var note by remember { mutableStateOf("") }
     var pd by remember { mutableStateOf("") }
@@ -458,9 +514,10 @@ fun SettingsScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, onBack: () -
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         OutlinedButton(onBack) { Text("◀ Kembali") }
+        SyncPanel(dao, scope, syncMsg, runSync)
         Panel("Saldo awal saving: ${rp(led.startSaving)}") {
             Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
-            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString())) } }) {
+            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), System.currentTimeMillis())) } }) {
                 Text("Simpan")
             }
         }
@@ -472,7 +529,7 @@ fun SettingsScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, onBack: () -
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("${p.note} · ${p.date}\n${rp(p.amount)}", Modifier.weight(1f))
-                    TextButton({ scope.launch { dao.delPrior(p) } }) { Text("Hapus") }
+                    TextButton({ scope.launch { dao.putPrior(p.copy(deleted = true, updated = System.currentTimeMillis())) } }) { Text("Hapus") }
                 }
             }
             Field(note, "Keterangan", false) { note = it }
@@ -480,10 +537,59 @@ fun SettingsScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, onBack: () -
             Field(amt, "Jumlah (Rp)") { amt = it }
             Button({
                 if (amt.num() > 0L) {
-                    scope.launch { dao.putPrior(Prior(note = note, date = pd, amount = amt.num())) }
+                    scope.launch { dao.putPrior(Prior(UUID.randomUUID().toString(), note, pd, amt.num(), System.currentTimeMillis())) }
                     note = ""; pd = ""; amt = ""
                 }
             }) { Text("Tambah") }
         }
+    }
+}
+
+// ---------- Sinkronisasi OneDrive & cadangan ----------
+
+@Composable
+fun SyncPanel(dao: AppDao, scope: CoroutineScope, msg: String, runSync: (Uri, Policy?, Boolean) -> Unit) {
+    val ctx = LocalContext.current
+    var linked by remember { mutableStateOf(prefs(ctx).getString("uri", null)) }
+    var info by remember { mutableStateOf("") }
+
+    fun link(u: Uri?) {
+        if (u == null) return
+        try {
+            ctx.contentResolver.takePersistableUriPermission(
+                u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+        }
+        prefs(ctx).edit().putString("uri", u.toString()).putLong("last", 0L).apply()
+        linked = u.toString()
+        runSync(u, null, true)
+    }
+
+    val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { link(it) }
+    val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { link(it) }
+    val backup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u ->
+        if (u != null) scope.launch { info = exportTo(ctx, dao, u) }
+    }
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u != null) runSync(u, null, false)
+    }
+
+    Panel("Sinkronisasi OneDrive") {
+        Text(if (linked != null) "File data sudah terhubung." else "Belum terhubung ke file OneDrive.")
+        if (msg.isNotEmpty()) Text(msg)
+        if (info.isNotEmpty()) Text(info)
+        Spacer(Modifier.height(6.dp))
+        if (linked != null) {
+            Button({ runSync(Uri.parse(linked!!), null, true) }, Modifier.fillMaxWidth()) { Text("Sinkronkan sekarang") }
+            TextButton({ prefs(ctx).edit().remove("uri").apply(); linked = null }) { Text("Putuskan dari file") }
+        } else {
+            Button({ create.launch("ranumOne-data.json") }, Modifier.fillMaxWidth()) { Text("Buat file baru di OneDrive") }
+            OutlinedButton({ open.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth()) { Text("Pilih file yang sudah ada") }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("Cadangan manual", fontWeight = FontWeight.Bold)
+        OutlinedButton({ backup.launch("ranumOne-cadangan.json") }, Modifier.fillMaxWidth()) { Text("Simpan salinan cadangan") }
+        OutlinedButton({ restore.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth()) { Text("Pulihkan dari file cadangan") }
     }
 }
