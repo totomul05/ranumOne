@@ -1,5 +1,6 @@
 package com.ranum.one
 
+import android.Manifest
 import android.app.DatePickerDialog
 import android.content.Intent
 import android.net.Uri
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +33,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -64,6 +67,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
@@ -211,6 +215,31 @@ fun App(dao: AppDao) {
         xlsx.launch("ranumOne-%d-%02d.xlsx".format(m.year, m.monthValue))
     }
 
+    var pendingPrint by remember { mutableStateOf<ByteArray?>(null) }
+    fun doPrint(b: ByteArray) {
+        scope.launch {
+            val msg = printerSend(ctx, b)
+            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+        }
+    }
+    val btPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        val b = pendingPrint
+        pendingPrint = null
+        if (ok && b != null) {
+            doPrint(b)
+        } else if (!ok) {
+            Toast.makeText(ctx, "Izin Bluetooth diperlukan untuk mencetak.", Toast.LENGTH_LONG).show()
+        }
+    }
+    val onPrint: (ByteArray) -> Unit = { b ->
+        if (btGranted(ctx)) {
+            doPrint(b)
+        } else {
+            pendingPrint = b
+            btPerm.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+    }
+
     var busy by remember { mutableStateOf(false) }
     var foreground by remember { mutableStateOf(true) }
 
@@ -271,7 +300,7 @@ fun App(dao: AppDao) {
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             if (settings) {
-                SettingsScreen(led, dao, scope, syncMsg, runSync) { settings = false }
+                SettingsScreen(led, dao, scope, syncMsg, runSync, onPrint) { settings = false }
             } else {
                 when (tab) {
                     0 -> Dashboard(
@@ -285,7 +314,7 @@ fun App(dao: AppDao) {
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
                     3 -> Assets(led, dao, scope)
-                    else -> Reports(led, onExport)
+                    else -> Reports(led, onExport, onPrint)
                 }
             }
         }
@@ -523,11 +552,53 @@ fun History(led: Ledger, onOpen: (LocalDate) -> Unit) {
 
 // ---------- Non-Liquid Asset ----------
 
+val RedInk = Color(0xFFC62828)
+val RedSoft = Color(0xFFFFEBEE)
+
+fun signed(v: Long): String = (if (v > 0) "+" else "") + rp(v)
+
+// Untung/rugi aset emas = nilai buyback sekarang - harga beli. Null jika bukan aset emas atau harga emas belum diisi.
+fun goldPl(led: Ledger, a: Asset): Long? = if (a.gold && led.goldPrice > 0) led.value(a) - a.price else null
+
+@Composable
+fun LineC(l: String, v: String, color: Color) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(l, Modifier.weight(1f), color = color)
+        Text(v, color = color)
+    }
+}
+
 @Composable
 fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     var gp by remember(led.goldPrice) { mutableStateOf(led.goldPrice.toString()) }
     var edit by remember { mutableStateOf<Asset?>(null) }
+    var filter by remember { mutableIntStateOf(0) }
 
+    // Spread emas: harga beli semua aset emas dibandingkan dengan nilai buyback hari ini
+    val golds = led.assets.filter { it.gold }
+    val modal = golds.sumOf { it.price }
+    val nowVal = golds.sumOf { led.value(it) }
+    val grams = golds.sumOf { it.weight }
+    val ready = led.goldPrice > 0 && modal > 0
+    val diff = nowVal - modal
+    val pct = if (modal > 0) diff * 100.0 / modal else 0.0
+    val sumBg = if (!ready) GoldSoft else if (diff >= 0) GreenSoft else RedSoft
+    val sumFg = if (!ready) GoldInk else if (diff >= 0) Green else RedInk
+    val nUntung = led.assets.count { (goldPl(led, it) ?: 0L) > 0L }
+    val nRugi = led.assets.count { (goldPl(led, it) ?: 0L) < 0L }
+    val items = led.assets.filter { a ->
+        val pl = goldPl(led, a)
+        when (filter) {
+            1 -> pl != null && pl > 0L
+            2 -> pl != null && pl < 0L
+            else -> true
+        }
+    }.sortedByDescending { a ->
+        val pl = goldPl(led, a)
+        if (pl == null) -1e9 else pl * 100.0 / maxOf(a.price, 1L)
+    }
+
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Panel("Total Non-Liquid: ${rp(led.assets.sumOf { led.value(it) })}") {
             Field(gp, "Harga buyback emas /gram (Rp)") { gp = it }
@@ -535,25 +606,94 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
                 Text("Simpan harga emas")
             }
         }
-        led.assets.forEach { a ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { edit = a }) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("${a.name} (${a.type})", fontWeight = FontWeight.Bold)
-                    Text("${a.weight} gr · beli ${rp(a.price)} · ${LocalDate.ofEpochDay(a.date)}")
-                    Text("Nilai ${rp(led.value(a))} · ${if (a.baru) "Aset Baru" else "Aset Lama"}")
+        Card(
+            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            colors = CardDefaults.cardColors(containerColor = sumBg)
+        ) {
+            Column(Modifier.padding(14.dp)) {
+                Text("SPREAD EMAS TOTAL", style = MaterialTheme.typography.labelLarge, color = sumFg)
+                if (!ready) {
+                    Text("Isi harga emas hari ini dan tambahkan aset emas untuk melihat untung atau rugi.", color = sumFg)
+                } else {
+                    Text(signed(diff), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = sumFg)
+                    Text(
+                        "%+.1f%%".format(pct) + " · " + (if (diff >= 0) "UNTUNG" else "RUGI"),
+                        fontWeight = FontWeight.Bold, color = sumFg
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LineC("Total harga beli (modal)", rp(modal), sumFg)
+                    LineC("Nilai sekarang (buyback)", rp(nowVal), sumFg)
+                    LineC("Berat emas total", "${"%.2f".format(grams)} gr", sumFg)
+                    LineC("Harga emas hari ini /gr", rp(led.goldPrice), sumFg)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Dihitung dari harga buyback per gram, jadi sudah memperhitungkan selisih beli-jual toko. Aset non-emas dinilai dari harga beli dan tidak ikut dihitung.",
+                    style = MaterialTheme.typography.bodySmall, color = sumFg
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("Semua (${led.assets.size})", "Untung ($nUntung)", "Rugi ($nRugi)").forEachIndexed { i, t ->
+                if (filter == i) {
+                    Button({ filter = i }, Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(t, maxLines = 1) }
+                } else {
+                    OutlinedButton({ filter = i }, Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(t, maxLines = 1) }
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = {
-                edit = Asset(
-                    uid = "", name = "", type = "Gold Bar", weight = 0.0, price = 0,
-                    date = LocalDate.now().toEpochDay(), baru = false, gold = true
-                )
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("+ Tambah aset") }
+        if (items.isEmpty()) Text("Tidak ada aset pada filter ini.", Modifier.padding(8.dp))
+        items.forEach { a ->
+            val pl = goldPl(led, a)
+            val itemPct = if (pl != null && a.price > 0) pl * 100.0 / a.price else 0.0
+            val tint = if (pl == null) Color(0xFFEEEEEE) else if (pl >= 0) GreenSoft else RedSoft
+            val ink = if (pl == null) Color(0xFF616161) else if (pl >= 0) Green else RedInk
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { edit = a },
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("${a.name} (${a.type})", fontWeight = FontWeight.Bold)
+                        if (a.gold && a.weight > 0) {
+                            Text(
+                                "${a.weight} gr · beli ${rp(a.price)} (${rp(Math.round(a.price / a.weight))}/gr)",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        } else {
+                            Text("Beli ${rp(a.price)} · dinilai dari harga beli", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(
+                            "Nilai sekarang ${rp(led.value(a))} · ${if (a.baru) "Aset Baru" else "Aset Lama"}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Box(Modifier.background(tint, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            if (pl == null) {
+                                Text("—", color = ink)
+                            } else {
+                                Text(signed(pl), fontWeight = FontWeight.Bold, color = ink, style = MaterialTheme.typography.bodySmall)
+                                Text("%+.1f%%".format(itemPct), color = ink, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(88.dp))
+    }
+    ExtendedFloatingActionButton(
+        onClick = {
+            edit = Asset(
+                uid = "", name = "", type = "Gold Bar", weight = 0.0, price = 0,
+                date = LocalDate.now().toEpochDay(), baru = false, gold = true
+            )
+        },
+        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        containerColor = Gold,
+        contentColor = GoldInk
+    ) { Text("+ Tambah aset", fontWeight = FontWeight.Bold) }
     }
 
     edit?.let { a ->
@@ -634,90 +774,174 @@ fun AssetDialog(a: Asset, onSave: (Asset) -> Unit, onDelete: () -> Unit, onDismi
 // ---------- Laporan ----------
 
 @Composable
-fun Reports(led: Ledger, onExport: (LocalDate) -> Unit) {
-    var yearly by remember { mutableStateOf(false) }
+fun Reports(led: Ledger, onExport: (LocalDate) -> Unit, onPrint: (ByteArray) -> Unit) {
+    var mode by remember { mutableIntStateOf(1) }
     var month by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     var menu by remember { mutableStateOf(false) }
+    var from by remember { mutableStateOf(LocalDate.now().minusDays(6)) }
+    var to by remember { mutableStateOf(LocalDate.now()) }
+    var pf by remember { mutableIntStateOf(0) }
+    val pickFrom = pickDate(from) { from = it }
+    val pickTo = pickDate(to) { to = it }
+    val yearly = mode == 2
     val year = month.year
-    val p = if (yearly) {
-        led.period("Tahun $year", LocalDate.of(year, 1, 1), LocalDate.of(year + 1, 1, 1))
-    } else {
-        led.period(monthLabel(month), month, month.plusMonths(1))
-    }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (yearly) OutlinedButton({ yearly = false }) { Text("Bulanan") } else Button({ yearly = false }) { Text("Bulanan") }
-            if (yearly) Button({ yearly = true }) { Text("Tahunan") } else OutlinedButton({ yearly = true }) { Text("Tahunan") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("Harian", "Bulanan", "Tahunan").forEachIndexed { i, t ->
+                if (mode == i) {
+                    Button({ mode = i }, Modifier.weight(1f)) { Text(t, maxLines = 1) }
+                } else {
+                    OutlinedButton({ mode = i }, Modifier.weight(1f)) { Text(t, maxLines = 1) }
+                }
+            }
         }
         Spacer(Modifier.height(8.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedButton({ month = month.minusYears(1) }) { Text("◀") }
-            Text("Tahun $year", fontWeight = FontWeight.Bold)
-            OutlinedButton({ month = month.plusYears(1) }) { Text("▶") }
-        }
-        if (!yearly) {
+
+        if (mode == 0) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(pickFrom, Modifier.weight(1f)) { Text("Dari: $from", maxLines = 1) }
+                OutlinedButton(pickTo, Modifier.weight(1f)) { Text("Sampai: $to", maxLines = 1) }
+            }
+            val n = java.time.temporal.ChronoUnit.DAYS.between(from, to) + 1
+            val valid = n in 1L..30L
+            if (!valid) {
+                Text(
+                    if (n < 1L) "Tanggal akhir harus sama atau setelah tanggal awal." else "Rentang maksimal 30 hari (sekarang $n hari).",
+                    color = RedInk, modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            val rows = led.days.filter { it.date >= from.toEpochDay() && it.date <= to.toEpochDay() }
+            Panel("Rincian harian") {
+                if (rows.isEmpty()) {
+                    Text("Tidak ada data pada rentang ini.")
+                } else {
+                    Cols("Tgl", "Masuk", "Keluar", "Selisih", true)
+                    rows.forEach { d ->
+                        val dt = LocalDate.ofEpochDay(d.date)
+                        Cols(
+                            "%02d/%02d".format(dt.dayOfMonth, dt.monthValue),
+                            plain(led.inc(d)), plain(led.exp(d)), plain(led.inc(d) - led.exp(d))
+                        )
+                    }
+                    HorizontalDivider()
+                    val tin = rows.sumOf { led.inc(it) }
+                    val tout = rows.sumOf { led.exp(it) }
+                    Cols("Total", plain(tin), plain(tout), plain(tin - tout), true)
+                }
+            }
+            PrintFilterRow(pf) { pf = it }
+            Button(
+                { onPrint(receiptDaily(led, from, to, pf)) },
+                Modifier.fillMaxWidth(),
+                enabled = valid
+            ) { Text("🖨 Cetak laporan harian") }
+        } else {
+            val p = if (yearly) {
+                led.period("Tahun $year", LocalDate.of(year, 1, 1), LocalDate.of(year + 1, 1, 1))
+            } else {
+                led.period(monthLabel(month), month, month.plusMonths(1))
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton({ month = month.minusMonths(1) }) { Text("◀") }
-                Box {
-                    TextButton({ menu = true }) {
-                        Text(monthLabel(month).substringBefore(" ") + " ▾", fontWeight = FontWeight.Bold)
-                    }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        (1..12).forEach { mth ->
-                            DropdownMenuItem(
-                                text = { Text(monthLabel(LocalDate.of(year, mth, 1)).substringBefore(" ")) },
-                                onClick = { month = LocalDate.of(year, mth, 1); menu = false }
-                            )
+                OutlinedButton({ month = month.minusYears(1) }) { Text("◀") }
+                Text("Tahun $year", fontWeight = FontWeight.Bold)
+                OutlinedButton({ month = month.plusYears(1) }) { Text("▶") }
+            }
+            if (!yearly) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton({ month = month.minusMonths(1) }) { Text("◀") }
+                    Box {
+                        TextButton({ menu = true }) {
+                            Text(monthLabel(month).substringBefore(" ") + " ▾", fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            (1..12).forEach { mth ->
+                                DropdownMenuItem(
+                                    text = { Text(monthLabel(LocalDate.of(year, mth, 1)).substringBefore(" ")) },
+                                    onClick = { month = LocalDate.of(year, mth, 1); menu = false }
+                                )
+                            }
                         }
                     }
-                }
-                OutlinedButton({ month = month.plusMonths(1) }) { Text("▶") }
-            }
-        }
-        TextButton({ month = LocalDate.now().withDayOfMonth(1) }) {
-            Text(if (yearly) "Ke tahun ini" else "Ke bulan ini")
-        }
-        Panel(p.label) {
-            Line("Total Transaksi", "${p.trx} orang")
-            Line("Pemasukan", rp(p.income))
-            Line("Pengeluaran", rp(p.expense))
-            Line("Selisih Operasional", rp(p.diff))
-            Line("Pembelian Aset Baru", rp(p.newAsset))
-            Line("Perubahan Saving", rp(p.savingChange))
-            Line("Saving Akhir", rp(p.savingEnd))
-            Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
-            Line("Net Worth Akhir", rp(p.netWorth), true)
-            Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
-            if (!yearly) {
-                OutlinedButton({ onExport(month) }, Modifier.fillMaxWidth()) {
-                    Text("⬇ Unduh Excel bulan ini")
+                    OutlinedButton({ month = month.plusMonths(1) }) { Text("▶") }
                 }
             }
-        }
-        if (yearly) {
-            val rows = (1..12).map {
-                val s = LocalDate.of(year, it, 1)
-                s to led.period("", s, s.plusMonths(1))
+            TextButton({ month = LocalDate.now().withDayOfMonth(1) }) {
+                Text(if (yearly) "Ke tahun ini" else "Ke bulan ini")
             }
-            Panel("Rincian per bulan $year") {
-                Cols("Bulan", "Pemasukan", "Pengeluaran", "Selisih", true)
-                rows.forEach { (s, q) ->
+            Panel(p.label) {
+                Line("Total Transaksi", "${p.trx} orang")
+                Line("Pemasukan", rp(p.income))
+                Line("Pengeluaran", rp(p.expense))
+                Line("Selisih Operasional", rp(p.diff))
+                Line("Pembelian Aset Baru", rp(p.newAsset))
+                Line("Perubahan Saving", rp(p.savingChange))
+                Line("Saving Akhir", rp(p.savingEnd))
+                Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))
+                Line("Net Worth Akhir", rp(p.netWorth), true)
+                Line("% Saving dari Pemasukan", "%.1f%%".format(p.pct))
+                if (!yearly) {
+                    OutlinedButton({ onExport(month) }, Modifier.fillMaxWidth()) {
+                        Text("⬇ Unduh Excel bulan ini")
+                    }
+                }
+            }
+            PrintFilterRow(pf) { pf = it }
+            Button(
+                { onPrint(if (yearly) receiptYear(led, year, pf) else receiptMonth(led, month, pf)) },
+                Modifier.fillMaxWidth()
+            ) { Text(if (yearly) "🖨 Cetak laporan tahunan" else "🖨 Cetak laporan bulanan") }
+            if (yearly) {
+                val rows = (1..12).map {
+                    val s = LocalDate.of(year, it, 1)
+                    s to led.period("", s, s.plusMonths(1))
+                }
+                Panel("Rincian per bulan $year") {
+                    Cols("Bulan", "Pemasukan", "Pengeluaran", "Selisih", true)
+                    rows.forEach { (s, q) ->
+                        Cols(
+                            monthLabel(s).substringBefore(" ").take(3),
+                            plain(q.income), plain(q.expense), plain(q.diff)
+                        )
+                    }
+                    HorizontalDivider()
                     Cols(
-                        monthLabel(s).substringBefore(" ").take(3),
-                        plain(q.income), plain(q.expense), plain(q.diff)
+                        "Total",
+                        plain(rows.sumOf { it.second.income }),
+                        plain(rows.sumOf { it.second.expense }),
+                        plain(rows.sumOf { it.second.diff }),
+                        true
                     )
                 }
-                HorizontalDivider()
-                Cols("Total", plain(rows.sumOf { it.second.income }), plain(rows.sumOf { it.second.expense }), plain(rows.sumOf { it.second.diff }), true)
+            }
+        }
+    }
+}
+
+@Composable
+fun PrintFilterRow(sel: Int, onSel: (Int) -> Unit) {
+    Text(
+        "Isi cetakan", style = MaterialTheme.typography.labelLarge, color = Green,
+        modifier = Modifier.padding(top = 8.dp)
+    )
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf("Semua", "Pemasukan", "Pengeluaran").forEachIndexed { i, t ->
+            if (sel == i) {
+                Button({ onSel(i) }, Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 2.dp)) {
+                    Text(t, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
+            } else {
+                OutlinedButton({ onSel(i) }, Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 2.dp)) {
+                    Text(t, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
     }
@@ -742,7 +966,7 @@ fun Cols(a: String, b: String, c: String, d: String, bold: Boolean = false) {
 @Composable
 fun SettingsScreen(
     led: Ledger, dao: AppDao, scope: CoroutineScope,
-    syncMsg: String, runSync: (Uri, Policy?, Boolean) -> Unit, onBack: () -> Unit
+    syncMsg: String, runSync: (Uri, Policy?, Boolean) -> Unit, onPrint: (ByteArray) -> Unit, onBack: () -> Unit
 ) {
     var other by remember(led.otherSaving) { mutableStateOf(led.otherSaving.toString()) }
     var note by remember { mutableStateOf("") }
@@ -752,6 +976,7 @@ fun SettingsScreen(
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         OutlinedButton(onBack) { Text("◀ Kembali") }
         SyncPanel(dao, scope, syncMsg, runSync)
+        PrinterPanel(onPrint)
         Panel("Saldo awal saving: ${rp(led.startSaving)}") {
             Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
             Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), Stamp.next())) } }) {
@@ -828,5 +1053,71 @@ fun SyncPanel(dao: AppDao, scope: CoroutineScope, msg: String, runSync: (Uri, Po
         Text("Cadangan manual", fontWeight = FontWeight.Bold)
         OutlinedButton({ backup.launch("ranumOne-cadangan.json") }, Modifier.fillMaxWidth()) { Text("Simpan salinan cadangan") }
         OutlinedButton({ restore.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth()) { Text("Pulihkan dari file cadangan") }
+    }
+}
+
+// ---------- Printer Bluetooth ----------
+
+@Composable
+fun PrinterPanel(onPrint: (ByteArray) -> Unit) {
+    val ctx = LocalContext.current
+    var name by remember { mutableStateOf(prefs(ctx).getString("printer_name", null)) }
+    var addr by remember { mutableStateOf(prefs(ctx).getString("printer_mac", null)) }
+    var list by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
+    val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) {
+            list = bondedPrinters(ctx)
+        } else {
+            Toast.makeText(ctx, "Izin Bluetooth diperlukan untuk memilih printer.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    Panel("Printer Bluetooth (struk 57 mm)") {
+        Text(if (addr != null) "Printer: ${name ?: "Tanpa nama"} ($addr)" else "Belum ada printer dipilih.")
+        Text(
+            "Pasangkan (pair) printer lebih dulu lewat pengaturan Bluetooth HP, lalu pilih di sini.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(Modifier.height(6.dp))
+        Button(
+            {
+                if (btGranted(ctx)) list = bondedPrinters(ctx) else perm.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            },
+            Modifier.fillMaxWidth()
+        ) { Text("Pilih printer") }
+        if (addr != null) {
+            OutlinedButton({ onPrint(receiptTest()) }, Modifier.fillMaxWidth()) { Text("Cetak tes") }
+            TextButton({
+                prefs(ctx).edit().remove("printer_mac").remove("printer_name").apply()
+                addr = null
+                name = null
+            }) { Text("Hapus pilihan printer") }
+        }
+    }
+
+    list?.let { l ->
+        AlertDialog(
+            onDismissRequest = { list = null },
+            title = { Text("Pilih printer") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    if (l.isEmpty()) {
+                        Text("Belum ada perangkat Bluetooth yang dipasangkan. Pasangkan printer dulu di pengaturan Bluetooth HP.")
+                    }
+                    l.forEach { (n, a) ->
+                        TextButton(
+                            {
+                                prefs(ctx).edit().putString("printer_mac", a).putString("printer_name", n).apply()
+                                name = n
+                                addr = a
+                                list = null
+                            },
+                            Modifier.fillMaxWidth()
+                        ) { Text("$n\n$a") }
+                    }
+                }
+            },
+            confirmButton = { TextButton({ list = null }) { Text("Tutup") } }
+        )
     }
 }
