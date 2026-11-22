@@ -32,6 +32,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -43,6 +44,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -102,12 +104,47 @@ class MainActivity : ComponentActivity() {
                     background = Color(0xFFFFFDF7), surface = Color(0xFFFFFDF7),
                     surfaceContainer = GoldSoft, surfaceContainerHighest = GreenSoft
                 )
-            ) { App(dao) }
+            ) { Gate(dao) }
         }
     }
 }
 
 // ---------- Komponen kecil ----------
+
+@Composable
+fun Gate(dao: AppDao) {
+    val ctx = LocalContext.current
+    var locked by remember { mutableStateOf(isLockEnabled(ctx)) }
+    DisposableEffect(Unit) {
+        var stopAt = 0L
+        val lc = (ctx as ComponentActivity).lifecycle
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_STOP) stopAt = System.currentTimeMillis()
+            if (e == Lifecycle.Event.ON_START && stopAt > 0L && isLockEnabled(ctx) &&
+                System.currentTimeMillis() - stopAt > 60_000L
+            ) {
+                locked = true
+            }
+        }
+        lc.addObserver(obs)
+        onDispose { lc.removeObserver(obs) }
+    }
+    Box(Modifier.fillMaxSize()) {
+        App(dao)
+        if (locked) LockScreen { locked = false }
+    }
+}
+
+@Composable
+fun Confirm(title: String, text: String, yes: String, onYes: () -> Unit, onNo: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onNo,
+        title = { Text(title) },
+        text = { Text(text) },
+        confirmButton = { TextButton(onYes) { Text(yes, color = RedInk) } },
+        dismissButton = { TextButton(onNo) { Text("Batal") } }
+    )
+}
 
 @Composable
 fun Line(l: String, v: String, bold: Boolean = false) {
@@ -172,6 +209,7 @@ fun Number?.z(): String = if (this == null || this.toLong() == 0L) "" else this.
 
 // ---------- Aplikasi ----------
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(dao: AppDao) {
     val days by dao.dailies().collectAsState(initial = emptyList<Daily>())
@@ -241,6 +279,7 @@ fun App(dao: AppDao) {
     }
 
     var busy by remember { mutableStateOf(false) }
+    var refreshing by remember { mutableStateOf(false) }
     var foreground by remember { mutableStateOf(true) }
 
     fun syncCore(uri: Uri, policy: Policy?, write: Boolean, silent: Boolean) {
@@ -249,6 +288,7 @@ fun App(dao: AppDao) {
             return
         }
         busy = true
+        if (!silent) refreshing = true
         scope.launch {
             try {
                 if (!silent) { syncMsg = "Menyinkronkan..."; syncState = 1 }
@@ -259,6 +299,7 @@ fun App(dao: AppDao) {
                 }
             } finally {
                 busy = false
+                refreshing = false
             }
         }
     }
@@ -299,6 +340,18 @@ fun App(dao: AppDao) {
         }
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = {
+                    val u = prefs(ctx).getString("uri", null)
+                    if (u != null) {
+                        syncCore(Uri.parse(u), null, true, false)
+                    } else {
+                        Toast.makeText(ctx, "Belum terhubung ke file sinkron. Atur di Pengaturan.", Toast.LENGTH_LONG).show()
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            ) {
             if (settings) {
                 SettingsScreen(led, dao, scope, syncMsg, runSync, onPrint) { settings = false }
             } else {
@@ -309,13 +362,21 @@ fun App(dao: AppDao) {
                             val u = prefs(ctx).getString("uri", null)
                             if (u != null) runSync(Uri.parse(u), null, true) else settings = true
                         },
-                        onSettings = { settings = true }
+                        onSettings = { settings = true },
+                        checks = sets.filter { it.k.startsWith("cek:") },
+                        onCheck = { calc, real ->
+                            scope.launch {
+                                val ts = System.currentTimeMillis()
+                                dao.putSetting(Setting("cek:$ts", "$calc;$real", Stamp.next()))
+                            }
+                        }
                     )
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
                     3 -> Assets(led, dao, scope)
                     else -> Reports(led, onExport, onPrint)
                 }
+            }
             }
         }
     }
@@ -357,7 +418,11 @@ fun StatCard(title: String, value: String, bg: Color, fg: Color, modifier: Modif
 }
 
 @Composable
-fun Dashboard(led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () -> Unit) {
+fun Dashboard(
+    led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () -> Unit,
+    checks: List<Setting>, onCheck: (Long, Long) -> Unit
+) {
+    var showCheck by remember { mutableStateOf(false) }
     var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
@@ -443,7 +508,9 @@ fun Dashboard(led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () ->
             Line("Rasio pemasukan : pengeluaran", "%.2f x".format(ratio))
             Line("Dana pindah ke aset baru", rp(p.newAsset))
         }
+        OutlinedButton({ showCheck = true }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Cek kas") }
         OutlinedButton(onSettings, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Pengaturan & saldo awal") }
+        if (showCheck) CashCheckDialog(saving, checks, onCheck) { showCheck = false }
         Spacer(Modifier.height(8.dp))
         Text(
             "Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.",
@@ -477,6 +544,46 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
     )
     val inc = f[3].num() + f[4].num()
     val exp = f[6].num() + f[7].num() + f[9].num()
+    var confirmSave by remember { mutableStateOf(false) }
+    var askDel by remember { mutableStateOf(false) }
+
+    fun save() {
+        scope.launch {
+            dao.putDaily(
+                Daily(
+                    date.toEpochDay(),
+                    f[0].num().toInt(), f[1].num().toInt(), f[2].num().toInt(),
+                    f[3].num(), f[4].num(), f[5],
+                    f[6].num(), f[7].num(), f[8],
+                    f[9].num(), Stamp.next(), false
+                )
+            )
+            dirty = false
+            msg = "Tersimpan ✓"
+        }
+    }
+
+    fun warnings(): List<String> {
+        val w = ArrayList<String>()
+        if (inc == 0L && exp == 0L && f[0].num() + f[1].num() + f[2].num() == 0L) {
+            w.add("Semua nilai masih 0.")
+        }
+        if (inc >= 1_000_000_000L || exp >= 1_000_000_000L) {
+            w.add("Ada angka lebih dari Rp1 miliar. Cek jumlah nol.")
+        }
+        val e = date.toEpochDay()
+        val recent = led.days.filter { it.date < e && it.date >= e - 30 }
+        if (recent.size >= 5) {
+            val ai = recent.sumOf { led.inc(it) } / recent.size
+            val ae = recent.sumOf { led.exp(it) } / recent.size
+            if (ai > 0L && inc > ai * 5) w.add("Pemasukan ${rp(inc)} lebih dari 5x rata-rata 30 hari terakhir (${rp(ai)}).")
+            if (ae > 0L && exp > ae * 5) w.add("Pengeluaran ${rp(exp)} lebih dari 5x rata-rata 30 hari terakhir (${rp(ae)}).")
+        }
+        if (f[4].num() > 0L && f[5].isBlank()) w.add("Pemasukan Lain terisi tetapi keterangan kosong.")
+        if (f[7].num() > 0L && f[8].isBlank()) w.add("Pengeluaran Lain terisi tetapi keterangan kosong.")
+        if (date.isAfter(LocalDate.now())) w.add("Tanggal ini di masa depan.")
+        return w
+    }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Row(
@@ -502,27 +609,52 @@ fun InputScreen(led: Ledger, dao: AppDao, scope: CoroutineScope, date: LocalDate
             Line("Perubahan Saving Harian", rp(inc - exp), true)
         }
         Button(
-            onClick = {
-                scope.launch {
-                    dao.putDaily(
-                        Daily(
-                            date.toEpochDay(),
-                            f[0].num().toInt(), f[1].num().toInt(), f[2].num().toInt(),
-                            f[3].num(), f[4].num(), f[5],
-                            f[6].num(), f[7].num(), f[8],
-                            f[9].num(), Stamp.next(), false
-                        )
-                    )
-                    dirty = false
-                    msg = "Tersimpan ✓"
-                }
-            },
+            onClick = { confirmSave = true },
             modifier = Modifier.fillMaxWidth()
         ) { Text("Simpan") }
         if (msg.isNotEmpty()) Text(msg)
         if (cur != null) {
-            TextButton({ scope.launch { dao.putDaily(cur.copy(deleted = true, updated = Stamp.next())) } }) { Text("Hapus data tanggal ini") }
+            TextButton({ askDel = true }) { Text("Hapus data tanggal ini") }
         }
+    }
+
+    if (confirmSave) {
+        val warns = warnings()
+        AlertDialog(
+            onDismissRequest = { confirmSave = false },
+            title = { Text("Periksa sebelum menyimpan") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(date.toString(), fontWeight = FontWeight.Bold)
+                    Line("Transaksi", "${f[0].num() + f[1].num() + f[2].num()} orang")
+                    Line("Pemasukan", rp(inc))
+                    Line("Pengeluaran", rp(exp))
+                    Line("Perubahan saving", rp(inc - exp), true)
+                    if (warns.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        warns.forEach {
+                            Text("⚠ $it", color = Color(0xFF8D4B00), style = MaterialTheme.typography.bodySmall)
+                            Spacer(Modifier.height(4.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton({ confirmSave = false; save() }) {
+                    Text(if (warns.isEmpty()) "Simpan" else "Simpan tetap")
+                }
+            },
+            dismissButton = { TextButton({ confirmSave = false }) { Text("Periksa lagi") } }
+        )
+    }
+    if (askDel && cur != null) {
+        Confirm(
+            "Hapus data?",
+            "Data tanggal $date akan dihapus (pemasukan ${rp(led.inc(cur))}, pengeluaran ${rp(led.exp(cur))}).",
+            "Hapus",
+            { askDel = false; scope.launch { dao.putDaily(cur.copy(deleted = true, updated = Stamp.next())) } },
+            { askDel = false }
+        )
     }
 }
 
@@ -573,6 +705,9 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     var gp by remember(led.goldPrice) { mutableStateOf(led.goldPrice.toString()) }
     var edit by remember { mutableStateOf<Asset?>(null) }
     var filter by remember { mutableIntStateOf(0) }
+    var delAsset by remember { mutableStateOf<Asset?>(null) }
+    var askGold by remember { mutableStateOf(false) }
+    val ctxA = LocalContext.current
 
     // Spread emas: harga beli semua aset emas dibandingkan dengan nilai buyback hari ini
     val golds = led.assets.filter { it.gold }
@@ -602,7 +737,17 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         Panel("Total Non-Liquid: ${rp(led.assets.sumOf { led.value(it) })}") {
             Field(gp, "Harga buyback emas /gram (Rp)") { gp = it }
-            Button({ scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), Stamp.next())) } }) {
+            Button({
+                val nv = gp.num()
+                val ov = led.goldPrice
+                if (nv <= 0L) {
+                    Toast.makeText(ctxA, "Isi harga emas lebih dari 0.", Toast.LENGTH_LONG).show()
+                } else if (ov > 0L && Math.abs(nv - ov) * 100.0 / ov > 15.0) {
+                    askGold = true
+                } else {
+                    scope.launch { dao.putSetting(Setting("gold", nv.toString(), Stamp.next())) }
+                }
+            }) {
                 Text("Simpan harga emas")
             }
         }
@@ -706,8 +851,26 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
                 }
                 edit = null
             },
-            onDelete = { scope.launch { dao.putAsset(a.copy(deleted = true, updated = Stamp.next())) }; edit = null },
+            onDelete = { delAsset = a; edit = null },
             onDismiss = { edit = null }
+        )
+    }
+    delAsset?.let { a ->
+        Confirm(
+            "Hapus aset?",
+            "${a.name} (${rp(a.price)}) akan dihapus dari daftar aset.",
+            "Hapus",
+            { delAsset = null; scope.launch { dao.putAsset(a.copy(deleted = true, updated = Stamp.next())) } },
+            { delAsset = null }
+        )
+    }
+    if (askGold) {
+        Confirm(
+            "Harga emas berubah besar",
+            "Harga baru ${rp(gp.num())}/gr berbeda lebih dari 15% dari harga sebelumnya ${rp(led.goldPrice)}/gr. Lanjutkan menyimpan?",
+            "Simpan",
+            { askGold = false; scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), Stamp.next())) } },
+            { askGold = false }
         )
     }
 }
@@ -947,6 +1110,56 @@ fun PrintFilterRow(sel: Int, onSel: (Int) -> Unit) {
     }
 }
 
+@Composable
+fun CashCheckDialog(calc: Long, checks: List<Setting>, onSave: (Long, Long) -> Unit, onClose: () -> Unit) {
+    var real by remember { mutableStateOf("") }
+    val r = real.num()
+    val diff = r - calc
+    val hist = checks
+        .filter { it.k.startsWith("cek:") }
+        .sortedByDescending { it.k.removePrefix("cek:").toLongOrNull() ?: 0L }
+        .take(5)
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Cek kas") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Line("Saldo saving di aplikasi", rp(calc), true)
+                Field(real, "Uang sebenarnya (Rp)") { real = it }
+                if (real.isNotEmpty()) {
+                    val msg = when {
+                        diff == 0L -> "Cocok. Pembukuan sesuai uang sebenarnya."
+                        diff > 0L -> "Uang sebenarnya LEBIH ${rp(diff)}. Kemungkinan ada pemasukan yang belum dicatat."
+                        else -> "Uang sebenarnya KURANG ${rp(-diff)}. Kemungkinan ada pengeluaran yang belum dicatat."
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(msg, color = if (diff == 0L) Green else RedInk, fontWeight = FontWeight.Bold)
+                }
+                if (hist.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("Riwayat cek terakhir", style = MaterialTheme.typography.labelLarge, color = Green)
+                    val fmt = java.text.SimpleDateFormat("dd MMM HH:mm", Locale("id", "ID"))
+                    hist.forEach { h ->
+                        val ts = h.k.removePrefix("cek:").toLongOrNull() ?: 0L
+                        val p = h.v.split(";")
+                        val d = (p.getOrNull(1)?.toLongOrNull() ?: 0L) - (p.getOrNull(0)?.toLongOrNull() ?: 0L)
+                        Line(fmt.format(java.util.Date(ts)), if (d == 0L) "Cocok" else signed(d))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton({
+                if (real.isNotEmpty()) {
+                    onSave(calc, r)
+                    onClose()
+                }
+            }) { Text("Simpan hasil cek") }
+        },
+        dismissButton = { TextButton(onClose) { Text("Tutup") } }
+    )
+}
+
 fun plain(v: Long): String = rp(v).replace("Rp", "")
 
 @Composable
@@ -972,11 +1185,13 @@ fun SettingsScreen(
     var note by remember { mutableStateOf("") }
     var pd by remember { mutableStateOf("") }
     var amt by remember { mutableStateOf("") }
+    var delPrior by remember { mutableStateOf<Prior?>(null) }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
         OutlinedButton(onBack) { Text("◀ Kembali") }
         SyncPanel(dao, scope, syncMsg, runSync)
         PrinterPanel(onPrint)
+        LockPanel()
         Panel("Saldo awal saving: ${rp(led.startSaving)}") {
             Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
             Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), Stamp.next())) } }) {
@@ -991,7 +1206,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("${p.note} · ${p.date}\n${rp(p.amount)}", Modifier.weight(1f))
-                    TextButton({ scope.launch { dao.putPrior(p.copy(deleted = true, updated = Stamp.next())) } }) { Text("Hapus") }
+                    TextButton({ delPrior = p }) { Text("Hapus") }
                 }
             }
             Field(note, "Keterangan", false) { note = it }
@@ -1004,6 +1219,15 @@ fun SettingsScreen(
                 }
             }) { Text("Tambah") }
         }
+    }
+    delPrior?.let { p ->
+        Confirm(
+            "Hapus sisa hasil usaha?",
+            "${p.note} (${rp(p.amount)}) akan dihapus dan saldo awal saving ikut berkurang.",
+            "Hapus",
+            { delPrior = null; scope.launch { dao.putPrior(p.copy(deleted = true, updated = Stamp.next())) } },
+            { delPrior = null }
+        )
     }
 }
 
