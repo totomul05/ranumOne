@@ -7,6 +7,7 @@ import android.net.Uri
 import android.widget.Toast
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -94,6 +95,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val dao = AppDb.get(this).dao()
         Stamp.see(prefs(this).getLong("seen", 0L))
+        if (Reminder.enabled(this)) Reminder.schedule(this)
         setContent {
             MaterialTheme(
                 colorScheme = lightColorScheme(
@@ -133,6 +135,8 @@ fun Gate(dao: AppDao) {
         App(dao)
         if (locked) LockScreen { locked = false }
     }
+    // Saat layar kunci tampil, tombol kembali hanya memindahkan aplikasi ke latar belakang
+    BackHandler(enabled = locked) { (ctx as ComponentActivity).moveTaskToBack(true) }
 }
 
 @Composable
@@ -218,6 +222,16 @@ fun App(dao: AppDao) {
     val sets by dao.settings().collectAsState(initial = emptyList<Setting>())
     val gold = sets.firstOrNull { it.k == "gold" }?.v?.toLongOrNull() ?: 0L
     val other = sets.firstOrNull { it.k == "other" }?.v?.toLongOrNull() ?: 0L
+    val target = sets.firstOrNull { it.k == "target" }?.v?.toLongOrNull() ?: 0L
+    val goldHist = remember(sets) {
+        sets.filter { it.k.startsWith("gold:") }
+            .mapNotNull { s ->
+                val t = s.k.removePrefix("gold:").toLongOrNull()
+                val v = s.v.toLongOrNull()
+                if (t != null && v != null) t to v else null
+            }
+            .sortedBy { it.first }
+    }
     val led = remember(days, assets, priors, gold, other) { Ledger(days, assets, priors, gold, other) }
     LaunchedEffect(days, assets, priors, sets) {
         days.forEach { Stamp.see(it.updated) }
@@ -327,6 +341,30 @@ fun App(dao: AppDao) {
     val names = listOf("Dashboard", "Input", "Riwayat", "Aset", "Laporan")
     val marks = listOf("📊", "✏️", "🕘", "🪙", "📑")
 
+    var lastBack by remember { mutableStateOf(0L) }
+    var askExit by remember { mutableStateOf(false) }
+    // Kembali: pengaturan -> dashboard; tab lain -> dashboard; di dashboard perlu 2x cepat untuk tanya keluar
+    BackHandler(enabled = true) {
+        if (settings) {
+            settings = false
+        } else if (tab != 0) {
+            tab = 0
+        } else {
+            val now = System.currentTimeMillis()
+            if (now - lastBack < 2000L) askExit = true
+            lastBack = now
+        }
+    }
+    if (askExit) {
+        AlertDialog(
+            onDismissRequest = { askExit = false },
+            title = { Text("Tutup aplikasi?") },
+            text = { Text("Apakah Anda yakin ingin menutup aplikasi?") },
+            confirmButton = { TextButton({ askExit = false; (ctx as ComponentActivity).finish() }) { Text("Ya") } },
+            dismissButton = { TextButton({ askExit = false }) { Text("Tidak") } }
+        )
+    }
+
     Scaffold(bottomBar = {
         NavigationBar {
             names.forEachIndexed { i, n ->
@@ -364,6 +402,10 @@ fun App(dao: AppDao) {
                         },
                         onSettings = { settings = true },
                         checks = sets.filter { it.k.startsWith("cek:") },
+                        target = target,
+                        onTarget = { v ->
+                            scope.launch { dao.putSetting(Setting("target", v.toString(), Stamp.next())) }
+                        },
                         onCheck = { calc, real ->
                             scope.launch {
                                 val ts = System.currentTimeMillis()
@@ -373,7 +415,7 @@ fun App(dao: AppDao) {
                     )
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
-                    3 -> Assets(led, dao, scope)
+                    3 -> Assets(led, dao, scope, goldHist)
                     else -> Reports(led, onExport, onPrint)
                 }
             }
@@ -420,9 +462,11 @@ fun StatCard(title: String, value: String, bg: Color, fg: Color, modifier: Modif
 @Composable
 fun Dashboard(
     led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () -> Unit,
-    checks: List<Setting>, onCheck: (Long, Long) -> Unit
+    checks: List<Setting>, onCheck: (Long, Long) -> Unit,
+    target: Long, onTarget: (Long) -> Unit
 ) {
     var showCheck by remember { mutableStateOf(false) }
+    var showTarget by remember { mutableStateOf(false) }
     var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
@@ -508,9 +552,49 @@ fun Dashboard(
             Line("Rasio pemasukan : pengeluaran", "%.2f x".format(ratio))
             Line("Dana pindah ke aset baru", rp(p.newAsset))
         }
+        Panel("Target tabungan ${monthLabel(m)}") {
+            if (target <= 0L) {
+                Text("Belum ada target. Atur target tabungan bulanan Anda.")
+            } else {
+                val prog = (p.diff.toFloat() / target.toFloat()).coerceIn(0f, 1f)
+                val pctT = maxOf(p.diff * 100.0 / target, 0.0)
+                Line("Tercapai bulan ini", rp(p.diff) + " dari " + rp(target))
+                LinearProgressIndicator(
+                    progress = { prog },
+                    modifier = Modifier.fillMaxWidth().height(10.dp),
+                    color = if (p.diff >= target) GreenMid else Gold,
+                    trackColor = Color.White
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (p.diff >= target) "Target tercapai (" + "%.0f".format(pctT) + "%)"
+                    else "%.0f".format(pctT) + "% tercapai, kurang " + rp(target - p.diff),
+                    fontWeight = FontWeight.Bold,
+                    color = if (p.diff >= target) Green else GoldInk
+                )
+            }
+            OutlinedButton({ showTarget = true }, Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                Text(if (target > 0L) "Ubah target" else "Atur target")
+            }
+        }
+        val trend = remember(led, m) {
+            (11 downTo 0).map { k ->
+                val s = m.minusMonths(k.toLong())
+                s to led.period("", s, s.plusMonths(1))
+            }
+        }
+        Panel("Tren 12 bulan sampai " + monthLabel(m)) {
+            TrendChart(
+                trend.map { it.second.income },
+                trend.map { it.second.expense },
+                trend.map { it.second.diff },
+                trend.map { monthLabel(it.first).substringBefore(" ").take(3) }
+            )
+        }
         OutlinedButton({ showCheck = true }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Cek kas") }
         OutlinedButton(onSettings, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Pengaturan & saldo awal") }
         if (showCheck) CashCheckDialog(saving, checks, onCheck) { showCheck = false }
+        if (showTarget) TargetDialog(target, onTarget) { showTarget = false }
         Spacer(Modifier.height(8.dp))
         Text(
             "Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.",
@@ -701,7 +785,7 @@ fun LineC(l: String, v: String, color: Color) {
 }
 
 @Composable
-fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
+fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope, goldHist: List<Pair<Long, Long>>) {
     var gp by remember(led.goldPrice) { mutableStateOf(led.goldPrice.toString()) }
     var edit by remember { mutableStateOf<Asset?>(null) }
     var filter by remember { mutableIntStateOf(0) }
@@ -745,7 +829,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
                 } else if (ov > 0L && Math.abs(nv - ov) * 100.0 / ov > 15.0) {
                     askGold = true
                 } else {
-                    scope.launch { dao.putSetting(Setting("gold", nv.toString(), Stamp.next())) }
+                    saveGoldPrice(dao, scope, nv)
                 }
             }) {
                 Text("Simpan harga emas")
@@ -778,6 +862,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
                 )
             }
         }
+        GoldHistoryPanel(goldHist)
         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("Semua (${led.assets.size})", "Untung ($nUntung)", "Rugi ($nRugi)").forEachIndexed { i, t ->
                 if (filter == i) {
@@ -869,7 +954,7 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
             "Harga emas berubah besar",
             "Harga baru ${rp(gp.num())}/gr berbeda lebih dari 15% dari harga sebelumnya ${rp(led.goldPrice)}/gr. Lanjutkan menyimpan?",
             "Simpan",
-            { askGold = false; scope.launch { dao.putSetting(Setting("gold", gp.num().toString(), Stamp.next())) } },
+            { askGold = false; saveGoldPrice(dao, scope, gp.num()) },
             { askGold = false }
         )
     }
@@ -1192,6 +1277,7 @@ fun SettingsScreen(
         SyncPanel(dao, scope, syncMsg, runSync)
         PrinterPanel(onPrint)
         LockPanel()
+        ReminderPanel()
         Panel("Saldo awal saving: ${rp(led.startSaving)}") {
             Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
             Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), Stamp.next())) } }) {

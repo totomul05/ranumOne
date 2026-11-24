@@ -3,6 +3,7 @@ package com.ranum.one
 import android.content.Context
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +15,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -21,6 +25,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -28,12 +33,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -57,10 +72,12 @@ fun setLock(ctx: Context, type: String, secret: String) {
         .putString("lock_salt", salt)
         .putString("lock_hash", hashOf(salt, secret))
         .apply()
+    // PIN baru selalu 6 angka; pola tidak punya panjang
+    if (type == "pin") prefs(ctx).edit().putInt("lock_len", 6).apply() else prefs(ctx).edit().remove("lock_len").apply()
 }
 
 fun clearLock(ctx: Context) {
-    prefs(ctx).edit().remove("lock_type").remove("lock_salt").remove("lock_hash").apply()
+    prefs(ctx).edit().remove("lock_type").remove("lock_salt").remove("lock_hash").remove("lock_len").apply()
 }
 
 fun checkLock(ctx: Context, secret: String): Boolean {
@@ -70,39 +87,92 @@ fun checkLock(ctx: Context, secret: String): Boolean {
 }
 
 @Composable
-fun PinPad(onSubmit: (String) -> Unit) {
-    var pin by remember { mutableStateOf("") }
+fun EyeIcon(open: Boolean, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(28.dp)) {
+        val u = size.width / 24f
+        val stroke = Stroke(width = 2.2f * u, cap = StrokeCap.Round)
+        if (open) {
+            val p = Path().apply {
+                moveTo(2f * u, 12f * u)
+                quadraticBezierTo(12f * u, 3f * u, 22f * u, 12f * u)
+                quadraticBezierTo(12f * u, 21f * u, 2f * u, 12f * u)
+                close()
+            }
+            drawPath(p, color, style = stroke)
+            drawCircle(color, radius = 3.4f * u, center = Offset(12f * u, 12f * u))
+        } else {
+            val p = Path().apply {
+                moveTo(2f * u, 10f * u)
+                quadraticBezierTo(12f * u, 19f * u, 22f * u, 10f * u)
+            }
+            drawPath(p, color, style = stroke)
+            drawLine(color, Offset(6f * u, 14.5f * u), Offset(4.5f * u, 18f * u), strokeWidth = 2.2f * u, cap = StrokeCap.Round)
+            drawLine(color, Offset(12f * u, 16f * u), Offset(12f * u, 20f * u), strokeWidth = 2.2f * u, cap = StrokeCap.Round)
+            drawLine(color, Offset(18f * u, 14.5f * u), Offset(19.5f * u, 18f * u), strokeWidth = 2.2f * u, cap = StrokeCap.Round)
+        }
+    }
+}
 
-    fun press(k: String) {
-        when (k) {
-            "⌫" -> pin = pin.dropLast(1)
-            "OK" -> {
-                if (pin.length >= 4) {
-                    val p = pin
-                    pin = ""
-                    onSubmit(p)
-                }
+// Input PIN memakai keyboard angka bawaan HP. Tampil 6 garis, berubah jadi * saat diketik.
+// Otomatis dikirim begitu angka ke-6 terisi, tanpa tombol OK.
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun PinInput(len: Int, onChange: (String) -> Unit, onComplete: (String) -> Unit) {
+    var pin by remember { mutableStateOf("") }
+    var show by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    // Minta fokus dan tampilkan keyboard angka; diulang beberapa kali karena jendela kadang belum siap
+    LaunchedEffect(Unit) {
+        for (attempt in 0 until 3) {
+            delay(if (attempt == 0) 250L else 400L)
+            try {
+                focus.requestFocus()
+            } catch (e: Exception) {
             }
-            else -> {
-                if (pin.length < 6) pin += k
-            }
+            keyboard?.show()
         }
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            if (pin.isEmpty()) " " else "●".repeat(pin.length),
-            style = MaterialTheme.typography.headlineMedium, color = Green
-        )
-        Spacer(Modifier.height(12.dp))
-        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK").chunked(3).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(vertical = 6.dp)) {
-                row.forEach { k ->
-                    OutlinedButton({ press(k) }, Modifier.size(width = 76.dp, height = 56.dp)) {
-                        Text(k, style = MaterialTheme.typography.titleMedium)
-                    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (i in 0 until len) {
+                    val ch = if (i < pin.length) (if (show) pin[i].toString() else "*") else "—"
+                    Text(
+                        ch,
+                        modifier = Modifier.width(30.dp),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = Green
+                    )
                 }
             }
+            BasicTextField(
+                value = pin,
+                onValueChange = { v ->
+                    val d = v.filter { it.isDigit() }.take(len)
+                    pin = d
+                    onChange(d)
+                    if (d.length == len) {
+                        scope.launch {
+                            delay(150)
+                            onComplete(d)
+                            pin = ""
+                        }
+                    }
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                singleLine = true,
+                modifier = Modifier.matchParentSize().alpha(0f).focusRequester(focus)
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(Modifier.size(40.dp).clickable { show = !show }, contentAlignment = Alignment.Center) {
+            EyeIcon(show, Green)
         }
     }
 }
@@ -169,14 +239,17 @@ fun PatternPad(onDone: (String) -> Unit) {
 }
 
 @Composable
-fun SecretEntry(type: String, prompt: String, error: String, onSubmit: (String) -> Unit) {
+fun SecretEntry(
+    type: String, prompt: String, error: String,
+    onChange: (String) -> Unit = {}, onSubmit: (String) -> Unit
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(prompt, style = MaterialTheme.typography.titleMedium, color = Green)
         if (error.isNotEmpty()) {
             Text(error, color = RedInk, style = MaterialTheme.typography.bodySmall)
         }
         Spacer(Modifier.height(12.dp))
-        if (type == "pin") PinPad(onSubmit) else PatternPad(onSubmit)
+        if (type == "pin") PinInput(6, onChange, onSubmit) else PatternPad(onSubmit)
     }
 }
 
@@ -188,6 +261,7 @@ fun LockScreen(onUnlock: () -> Unit) {
     var fails by remember { mutableIntStateOf(0) }
     var wait by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
+    val legacy = type == "pin" && !prefs(ctx).contains("lock_len")
 
     Box(
         Modifier.fillMaxSize().background(Color(0xFFFFFDF7)).pointerInput(Unit) {
@@ -205,7 +279,10 @@ fun LockScreen(onUnlock: () -> Unit) {
             SecretEntry(
                 type,
                 if (type == "pin") "Masukkan PIN" else "Gambar pola",
-                if (wait > 0) "Terlalu banyak percobaan. Tunggu $wait detik." else error
+                if (wait > 0) "Terlalu banyak percobaan. Tunggu $wait detik." else error,
+                onChange = { d ->
+                    if (legacy && d.length in 4..5 && wait == 0 && checkLock(ctx, d)) onUnlock()
+                }
             ) { s ->
                 if (wait > 0) return@SecretEntry
                 if (s.isNotEmpty() && checkLock(ctx, s)) {
@@ -240,7 +317,7 @@ fun LockSetupDialog(type: String, onSaved: (String) -> Unit, onDismiss: () -> Un
             SecretEntry(
                 type,
                 if (first == null) {
-                    if (type == "pin") "Masukkan PIN baru (4-6 angka)" else "Gambar pola baru (min. 4 titik)"
+                    if (type == "pin") "Masukkan PIN baru (6 angka)" else "Gambar pola baru (min. 4 titik)"
                 } else {
                     "Ulangi untuk konfirmasi"
                 },
@@ -306,25 +383,30 @@ fun LockPanel() {
         }
     }
 
+    fun verified() {
+        verifying = false
+        err = ""
+        if (action == "off") {
+            clearLock(ctx)
+            type = null
+        } else {
+            setup = true
+        }
+    }
+
     if (verifying) {
         val t = type ?: "pin"
         AlertDialog(
             onDismissRequest = { verifying = false },
             title = { Text("Konfirmasi") },
             text = {
-                SecretEntry(t, if (t == "pin") "Masukkan PIN saat ini" else "Gambar pola saat ini", err) { s ->
-                    if (s.isNotEmpty() && checkLock(ctx, s)) {
-                        verifying = false
-                        err = ""
-                        if (action == "off") {
-                            clearLock(ctx)
-                            type = null
-                        } else {
-                            setup = true
-                        }
-                    } else {
-                        err = "Salah, coba lagi."
+                SecretEntry(
+                    t, if (t == "pin") "Masukkan PIN saat ini" else "Gambar pola saat ini", err,
+                    onChange = { d ->
+                        if (t == "pin" && !prefs(ctx).contains("lock_len") && d.length in 4..5 && checkLock(ctx, d)) verified()
                     }
+                ) { s ->
+                    if (s.isNotEmpty() && checkLock(ctx, s)) verified() else err = "Salah, coba lagi."
                 }
             },
             confirmButton = {},
