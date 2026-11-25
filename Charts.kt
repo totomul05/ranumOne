@@ -55,7 +55,7 @@ private fun nearestIdx(pts: List<Pair<Long, Long>>, x: Float, w: Float): Int {
 }
 
 @Composable
-fun GoldHistoryPanel(hist: List<Pair<Long, Long>>) {
+fun GoldHistoryPanel(hist: List<Pair<Long, Long>>, alwaysOpen: Boolean = false) {
     var open by remember { mutableStateOf(false) }
     var period by remember { mutableIntStateOf(1) }
     var sel by remember(period) { mutableStateOf<Int?>(null) }
@@ -79,11 +79,13 @@ fun GoldHistoryPanel(hist: List<Pair<Long, Long>>) {
             },
             style = MaterialTheme.typography.bodySmall
         )
-        Spacer(Modifier.height(6.dp))
-        Button({ open = !open }, Modifier.fillMaxWidth()) {
-            Text(if (open) "Sembunyikan grafik" else "Lihat grafik harga emas")
+        if (!alwaysOpen) {
+            Spacer(Modifier.height(6.dp))
+            Button({ open = !open }, Modifier.fillMaxWidth()) {
+                Text(if (open) "Sembunyikan grafik" else "Lihat grafik harga emas")
+            }
         }
-        if (open) {
+        if (open || alwaysOpen) {
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("7 hari", "30 hari", "1 tahun", "Semua").forEachIndexed { i, t ->

@@ -12,6 +12,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.History as HistoryIcon
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.MonetizationOn
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,30 +91,15 @@ import java.time.LocalDate
 import java.util.Locale
 import java.util.UUID
 
-val Green = Color(0xFF1B5E20)
-val GreenMid = Color(0xFF2E7D32)
-val GreenSoft = Color(0xFFE8F5E9)
-val Gold = Color(0xFFFFC107)
-val GoldSoft = Color(0xFFFFF8E1)
-val GoldInk = Color(0xFF3E2C00)
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val dao = AppDb.get(this).dao()
         Stamp.see(prefs(this).getLong("seen", 0L))
         if (Reminder.enabled(this)) Reminder.schedule(this)
+        Pal.idx = prefs(this).getInt("theme", 0)
         setContent {
-            MaterialTheme(
-                colorScheme = lightColorScheme(
-                    primary = Green, onPrimary = Color.White,
-                    primaryContainer = GreenSoft, onPrimaryContainer = Green,
-                    secondary = Gold, onSecondary = GoldInk,
-                    secondaryContainer = Color(0xFFFFE082), onSecondaryContainer = GoldInk,
-                    background = Color(0xFFFFFDF7), surface = Color(0xFFFFFDF7),
-                    surfaceContainer = GoldSoft, surfaceContainerHighest = GreenSoft
-                )
-            ) { Gate(dao) }
+            MaterialTheme(colorScheme = appScheme()) { Gate(dao) }
         }
     }
 }
@@ -165,11 +158,14 @@ fun Line(l: String, v: String, bold: Boolean = false) {
 fun Panel(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        colors = CardDefaults.cardColors(containerColor = GreenSoft)
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(0.5.dp, Pal.cur.bd)
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Green)
-            Spacer(Modifier.height(6.dp))
+        Column(Modifier.padding(14.dp)) {
+            if (title.isNotEmpty()) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Green)
+                Spacer(Modifier.height(6.dp))
+            }
             content()
         }
     }
@@ -244,7 +240,7 @@ fun App(dao: AppDao) {
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
     var date by remember { mutableStateOf(LocalDate.now()) }
-    var settings by remember { mutableStateOf(false) }
+    var sub by remember { mutableStateOf<String?>(null) }
     var syncMsg by remember { mutableStateOf("") }
     // 0 abu-abu: belum terhubung, 1 kuning: sedang/menunggu, 2 hijau: tersinkron, 3 merah: gagal
     var syncState by remember { mutableIntStateOf(if (prefs(ctx).getString("uri", null) != null) 1 else 0) }
@@ -338,15 +334,18 @@ fun App(dao: AppDao) {
         }
     }
 
-    val names = listOf("Dashboard", "Input", "Riwayat", "Aset", "Laporan")
-    val marks = listOf("📊", "✏️", "🕘", "🪙", "📑")
+    val names = listOf("Beranda", "Input", "Riwayat", "Aset", "Pengaturan")
+    val navIcons = listOf(
+        Icons.Rounded.Home, Icons.Rounded.Edit, Icons.Rounded.HistoryIcon,
+        Icons.Rounded.MonetizationOn, Icons.Rounded.Settings
+    )
 
     var lastBack by remember { mutableStateOf(0L) }
     var askExit by remember { mutableStateOf(false) }
-    // Kembali: pengaturan -> dashboard; tab lain -> dashboard; di dashboard perlu 2x cepat untuk tanya keluar
+    // Kembali: submenu -> menu pengaturan; tab lain -> beranda; di beranda perlu 2x cepat untuk tanya keluar
     BackHandler(enabled = true) {
-        if (settings) {
-            settings = false
+        if (sub != null) {
+            sub = null
         } else if (tab != 0) {
             tab = 0
         } else {
@@ -369,9 +368,9 @@ fun App(dao: AppDao) {
         NavigationBar {
             names.forEachIndexed { i, n ->
                 NavigationBarItem(
-                    selected = tab == i && !settings,
-                    onClick = { tab = i; settings = false },
-                    icon = { Text(marks[i]) },
+                    selected = tab == i,
+                    onClick = { tab = i; sub = null },
+                    icon = { Icon(navIcons[i], contentDescription = n) },
                     label = { Text(n, maxLines = 1) }
                 )
             }
@@ -390,35 +389,52 @@ fun App(dao: AppDao) {
                 },
                 modifier = Modifier.fillMaxSize()
             ) {
-            if (settings) {
-                SettingsScreen(led, dao, scope, syncMsg, runSync, onPrint) { settings = false }
-            } else {
                 when (tab) {
                     0 -> Dashboard(
                         led, syncState,
                         onSync = {
                             val u = prefs(ctx).getString("uri", null)
-                            if (u != null) runSync(Uri.parse(u), null, true) else settings = true
+                            if (u != null) {
+                                runSync(Uri.parse(u), null, true)
+                            } else {
+                                tab = 4
+                                sub = "sinkron"
+                            }
                         },
-                        onSettings = { settings = true },
                         checks = sets.filter { it.k.startsWith("cek:") },
-                        target = target,
-                        onTarget = { v ->
-                            scope.launch { dao.putSetting(Setting("target", v.toString(), Stamp.next())) }
-                        },
                         onCheck = { calc, real ->
                             scope.launch {
                                 val ts = System.currentTimeMillis()
                                 dao.putSetting(Setting("cek:$ts", "$calc;$real", Stamp.next()))
                             }
+                        },
+                        target = target,
+                        onTarget = { v ->
+                            scope.launch { dao.putSetting(Setting("target", v.toString(), Stamp.next())) }
                         }
                     )
                     1 -> InputScreen(led, dao, scope, date) { date = it }
                     2 -> History(led) { date = it; tab = 1 }
-                    3 -> Assets(led, dao, scope, goldHist)
-                    else -> Reports(led, onExport, onPrint)
+                    3 -> Assets(led, dao, scope)
+                    else -> {
+                        val s = sub
+                        if (s == null) {
+                            SettingsHub(led, syncState) { sub = it }
+                        } else {
+                            val back = { sub = null }
+                            when (s) {
+                                "laporan" -> SubScreen("Laporan dan cetak", back, false) { Reports(led, onExport, onPrint) }
+                                "emas" -> SubScreen("Grafik harga emas", back) { GoldHistoryPanel(goldHist, true) }
+                                "saldo" -> SubScreen("Saldo awal saving", back) { SaldoAwalScreen(led, dao, scope) }
+                                "sinkron" -> SubScreen("Sinkronisasi", back) { SyncPanel(dao, scope, syncMsg, runSync) }
+                                "printer" -> SubScreen("Printer Bluetooth", back) { PrinterPanel(onPrint) }
+                                "kunci" -> SubScreen("Kunci aplikasi", back) { LockPanel() }
+                                "pengingat" -> SubScreen("Pengingat harian", back) { ReminderPanel() }
+                                else -> SubScreen("Warna tampilan", back) { ThemePanel() }
+                            }
+                        }
+                    }
                 }
-            }
             }
         }
     }
@@ -442,163 +458,6 @@ fun App(dao: AppDao) {
                     TextButton({ conflict = null }) { Text("Batal") }
                 }
             }
-        )
-    }
-}
-
-// ---------- Dashboard ----------
-
-@Composable
-fun StatCard(title: String, value: String, bg: Color, fg: Color, modifier: Modifier) {
-    Card(modifier, colors = CardDefaults.cardColors(containerColor = bg)) {
-        Column(Modifier.padding(12.dp)) {
-            Text(title, style = MaterialTheme.typography.labelMedium, color = fg)
-            Spacer(Modifier.height(4.dp))
-            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = fg)
-        }
-    }
-}
-
-@Composable
-fun Dashboard(
-    led: Ledger, syncState: Int, onSync: () -> Unit, onSettings: () -> Unit,
-    checks: List<Setting>, onCheck: (Long, Long) -> Unit,
-    target: Long, onTarget: (Long) -> Unit
-) {
-    var showCheck by remember { mutableStateOf(false) }
-    var showTarget by remember { mutableStateOf(false) }
-    var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
-    val saving = led.savingBefore(LocalDate.MAX)
-    val nl = led.assets.sumOf { led.value(it) }
-    val tin = led.days.sumOf { led.inc(it) }
-    val tout = led.days.sumOf { led.exp(it) }
-    val p = led.period("", m, m.plusMonths(1))
-    val ratio = if (p.expense == 0L) 0.0 else p.income.toDouble() / p.expense
-    val mx = maxOf(p.income, p.expense, 1L).toFloat()
-    val dot = when (syncState) {
-        1 -> Color(0xFFFFC107)
-        2 -> Color(0xFF43A047)
-        3 -> Color(0xFFE53935)
-        else -> Color(0xFF9E9E9E)
-    }
-
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("ranumOne", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Green)
-                Text("One Roof, One financial Journey", style = MaterialTheme.typography.bodySmall)
-            }
-            Box(Modifier.size(12.dp).background(dot, CircleShape))
-            Spacer(Modifier.width(8.dp))
-            Button(onSync, colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) {
-                Text("🔄 Sinkron")
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Green)) {
-            Column(Modifier.padding(16.dp)) {
-                Text("TOTAL NET WORTH", style = MaterialTheme.typography.labelLarge, color = Gold)
-                Text(rp(saving + nl), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                Text("Saving likuid + aset non-liquid", style = MaterialTheme.typography.bodySmall, color = GreenSoft)
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Saving (Likuid)", rp(saving), GreenSoft, Green, Modifier.weight(1f))
-            StatCard("Non-Liquid Asset", rp(nl), GoldSoft, GoldInk, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Total Pemasukan", rp(tin), GreenSoft, Green, Modifier.weight(1f))
-            StatCard("Total Pengeluaran", rp(tout), Color(0xFFFFF3E0), Color(0xFF8D4B00), Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        Panel("Indikator bulan") {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton({ m = m.minusMonths(1) }) { Text("◀") }
-                Text(monthLabel(m), fontWeight = FontWeight.Bold)
-                OutlinedButton({ m = m.plusMonths(1) }) { Text("▶") }
-            }
-            Line("Pemasukan bulan ini", rp(p.income))
-            LinearProgressIndicator(
-                progress = { p.income.toFloat() / mx },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = GreenMid, trackColor = Color.White
-            )
-            Spacer(Modifier.height(6.dp))
-            Line("Pengeluaran bulan ini", rp(p.expense))
-            LinearProgressIndicator(
-                progress = { p.expense.toFloat() / mx },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = Gold, trackColor = Color.White
-            )
-            Spacer(Modifier.height(6.dp))
-            Line("Selisih operasional", rp(p.diff), true)
-            Line("Persentase saving dari pemasukan", "%.1f%%".format(p.pct))
-            LinearProgressIndicator(
-                progress = { (p.pct / 100.0).coerceIn(0.0, 1.0).toFloat() },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = Gold, trackColor = Color.White
-            )
-            Spacer(Modifier.height(6.dp))
-            Line("Rasio pemasukan : pengeluaran", "%.2f x".format(ratio))
-            Line("Dana pindah ke aset baru", rp(p.newAsset))
-        }
-        Panel("Target tabungan ${monthLabel(m)}") {
-            if (target <= 0L) {
-                Text("Belum ada target. Atur target tabungan bulanan Anda.")
-            } else {
-                val prog = (p.diff.toFloat() / target.toFloat()).coerceIn(0f, 1f)
-                val pctT = maxOf(p.diff * 100.0 / target, 0.0)
-                Line("Tercapai bulan ini", rp(p.diff) + " dari " + rp(target))
-                LinearProgressIndicator(
-                    progress = { prog },
-                    modifier = Modifier.fillMaxWidth().height(10.dp),
-                    color = if (p.diff >= target) GreenMid else Gold,
-                    trackColor = Color.White
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    if (p.diff >= target) "Target tercapai (" + "%.0f".format(pctT) + "%)"
-                    else "%.0f".format(pctT) + "% tercapai, kurang " + rp(target - p.diff),
-                    fontWeight = FontWeight.Bold,
-                    color = if (p.diff >= target) Green else GoldInk
-                )
-            }
-            OutlinedButton({ showTarget = true }, Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                Text(if (target > 0L) "Ubah target" else "Atur target")
-            }
-        }
-        val trend = remember(led, m) {
-            (11 downTo 0).map { k ->
-                val s = m.minusMonths(k.toLong())
-                s to led.period("", s, s.plusMonths(1))
-            }
-        }
-        Panel("Tren 12 bulan sampai " + monthLabel(m)) {
-            TrendChart(
-                trend.map { it.second.income },
-                trend.map { it.second.expense },
-                trend.map { it.second.diff },
-                trend.map { monthLabel(it.first).substringBefore(" ").take(3) }
-            )
-        }
-        OutlinedButton({ showCheck = true }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Cek kas") }
-        OutlinedButton(onSettings, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Pengaturan & saldo awal") }
-        if (showCheck) CashCheckDialog(saving, checks, onCheck) { showCheck = false }
-        if (showTarget) TargetDialog(target, onTarget) { showTarget = false }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Pembelian aset tidak mengurangi net worth: hanya memindahkan dana dari saving ke non-liquid.",
-            style = MaterialTheme.typography.bodySmall
         )
     }
 }
@@ -785,7 +644,7 @@ fun LineC(l: String, v: String, color: Color) {
 }
 
 @Composable
-fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope, goldHist: List<Pair<Long, Long>>) {
+fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope) {
     var gp by remember(led.goldPrice) { mutableStateOf(led.goldPrice.toString()) }
     var edit by remember { mutableStateOf<Asset?>(null) }
     var filter by remember { mutableIntStateOf(0) }
@@ -862,7 +721,6 @@ fun Assets(led: Ledger, dao: AppDao, scope: CoroutineScope, goldHist: List<Pair<
                 )
             }
         }
-        GoldHistoryPanel(goldHist)
         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("Semua (${led.assets.size})", "Untung ($nUntung)", "Rugi ($nRugi)").forEachIndexed { i, t ->
                 if (filter == i) {
@@ -1256,64 +1114,6 @@ fun Cols(a: String, b: String, c: String, d: String, bold: Boolean = false) {
         Text(b, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
         Text(c, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
         Text(d, modifier = Modifier.weight(1.2f), style = st, fontWeight = w, textAlign = TextAlign.End)
-    }
-}
-
-// ---------- Pengaturan ----------
-
-@Composable
-fun SettingsScreen(
-    led: Ledger, dao: AppDao, scope: CoroutineScope,
-    syncMsg: String, runSync: (Uri, Policy?, Boolean) -> Unit, onPrint: (ByteArray) -> Unit, onBack: () -> Unit
-) {
-    var other by remember(led.otherSaving) { mutableStateOf(led.otherSaving.toString()) }
-    var note by remember { mutableStateOf("") }
-    var pd by remember { mutableStateOf("") }
-    var amt by remember { mutableStateOf("") }
-    var delPrior by remember { mutableStateOf<Prior?>(null) }
-
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
-        OutlinedButton(onBack) { Text("◀ Kembali") }
-        SyncPanel(dao, scope, syncMsg, runSync)
-        PrinterPanel(onPrint)
-        LockPanel()
-        ReminderPanel()
-        Panel("Saldo awal saving: ${rp(led.startSaving)}") {
-            Field(other, "Saldo awal saving lain (di luar usaha)") { other = it }
-            Button({ scope.launch { dao.putSetting(Setting("other", other.num().toString(), Stamp.next())) } }) {
-                Text("Simpan")
-            }
-        }
-        Panel("Sisa hasil usaha sebelumnya") {
-            led.priors.forEach { p ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("${p.note} · ${p.date}\n${rp(p.amount)}", Modifier.weight(1f))
-                    TextButton({ delPrior = p }) { Text("Hapus") }
-                }
-            }
-            Field(note, "Keterangan", false) { note = it }
-            Field(pd, "Tanggal / periode", false) { pd = it }
-            Field(amt, "Jumlah (Rp)") { amt = it }
-            Button({
-                if (amt.num() > 0L) {
-                    scope.launch { dao.putPrior(Prior(UUID.randomUUID().toString(), note, pd, amt.num(), Stamp.next())) }
-                    note = ""; pd = ""; amt = ""
-                }
-            }) { Text("Tambah") }
-        }
-    }
-    delPrior?.let { p ->
-        Confirm(
-            "Hapus sisa hasil usaha?",
-            "${p.note} (${rp(p.amount)}) akan dihapus dan saldo awal saving ikut berkurang.",
-            "Hapus",
-            { delPrior = null; scope.launch { dao.putPrior(p.copy(deleted = true, updated = Stamp.next())) } },
-            { delPrior = null }
-        )
     }
 }
 

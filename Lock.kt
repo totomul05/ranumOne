@@ -264,7 +264,7 @@ fun LockScreen(onUnlock: () -> Unit) {
     val legacy = type == "pin" && !prefs(ctx).contains("lock_len")
 
     Box(
-        Modifier.fillMaxSize().background(Color(0xFFFFFDF7)).pointerInput(Unit) {
+        Modifier.fillMaxSize().background(Pal.cur.bg).pointerInput(Unit) {
             awaitPointerEventScope {
                 while (true) {
                     awaitPointerEvent().changes.forEach { it.consume() }
