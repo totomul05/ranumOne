@@ -264,10 +264,12 @@ fun LockScreen(onUnlock: () -> Unit) {
     val legacy = type == "pin" && !prefs(ctx).contains("lock_len")
 
     Box(
+        // Menahan sentuhan agar tidak tembus ke layar di bawahnya, tanpa menandai sentuhan sebagai "sudah dipakai"
+        // (menandainya membuat pola, ikon mata, dan tombol di layar ini ikut dibatalkan).
         Modifier.fillMaxSize().background(Pal.cur.bg).pointerInput(Unit) {
             awaitPointerEventScope {
                 while (true) {
-                    awaitPointerEvent().changes.forEach { it.consume() }
+                    awaitPointerEvent()
                 }
             }
         },

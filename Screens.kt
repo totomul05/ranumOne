@@ -1,5 +1,6 @@
 package com.ranum.one
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -103,6 +104,13 @@ fun Dashboard(
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
     val p = led.period("", m, m.plusMonths(1))
+    val golds = led.assets.filter { it.gold }
+    val goldModal = golds.sumOf { it.price }
+    val goldNow = golds.sumOf { led.value(it) }
+    val goldReady = led.goldPrice > 0L && goldModal > 0L
+    val gDiff = goldNow - goldModal
+    val gPct = if (goldModal > 0L) gDiff * 100.0 / goldModal else 0.0
+    val gInk = if (gDiff >= 0L) Green else RedInk
     val ratio = if (p.expense == 0L) 0.0 else p.income.toDouble() / p.expense
     val dot = when (syncState) {
         1 -> Color(0xFFFFC107)
@@ -152,6 +160,36 @@ fun Dashboard(
                     Column(Modifier.weight(1f)) {
                         Text("Aset non-likuid", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.75f))
                         Text(rp(nl), fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+            }
+        }
+
+        if (golds.isNotEmpty()) {
+            Card(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (!goldReady) Color.White else if (gDiff >= 0L) GreenSoft else RedSoft
+                ),
+                border = BorderStroke(0.5.dp, Pal.cur.bd)
+            ) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Aset emas", style = MaterialTheme.typography.labelMedium, color = Pal.cur.mu)
+                        Text(rp(goldNow), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (!goldReady) {
+                            Text("Isi harga emas di tab Aset", style = MaterialTheme.typography.bodySmall, color = Pal.cur.mu)
+                        } else {
+                            Text(
+                                if (gDiff >= 0L) "UNTUNG" else "RUGI",
+                                style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = gInk
+                            )
+                            Text(signed(gDiff), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = gInk)
+                            Text("%+.1f%%".format(gPct), style = MaterialTheme.typography.bodySmall, color = gInk)
+                        }
                     }
                 }
             }
