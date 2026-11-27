@@ -228,7 +228,8 @@ fun App(dao: AppDao) {
             }
             .sortedBy { it.first }
     }
-    val led = remember(days, assets, priors, gold, other) { Ledger(days, assets, priors, gold, other) }
+    val lp = remember(sets) { parseLoans(sets) }
+    val led = remember(days, assets, priors, gold, other, lp) { Ledger(days, assets, priors, gold, other, lp.first, lp.second) }
     LaunchedEffect(days, assets, priors, sets) {
         days.forEach { Stamp.see(it.updated) }
         assets.forEach { Stamp.see(it.updated) }
@@ -241,6 +242,7 @@ fun App(dao: AppDao) {
     var tab by remember { mutableIntStateOf(0) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var sub by remember { mutableStateOf<String?>(null) }
+    var loanFromHome by remember { mutableStateOf(false) }
     var syncMsg by remember { mutableStateOf("") }
     // 0 abu-abu: belum terhubung, 1 kuning: sedang/menunggu, 2 hijau: tersinkron, 3 merah: gagal
     var syncState by remember { mutableIntStateOf(if (prefs(ctx).getString("uri", null) != null) 1 else 0) }
@@ -345,6 +347,7 @@ fun App(dao: AppDao) {
     // Kembali: submenu -> menu pengaturan; tab lain -> beranda; di beranda perlu 2x cepat untuk tanya keluar
     BackHandler(enabled = true) {
         if (sub != null) {
+            if (sub == "hutang" && loanFromHome) tab = 0
             sub = null
         } else if (tab != 0) {
             tab = 0
@@ -411,6 +414,11 @@ fun App(dao: AppDao) {
                         target = target,
                         onTarget = { v ->
                             scope.launch { dao.putSetting(Setting("target", v.toString(), Stamp.next())) }
+                        },
+                        onLoans = {
+                            loanFromHome = true
+                            tab = 4
+                            sub = "hutang"
                         }
                     )
                     1 -> InputScreen(led, dao, scope, date) { date = it }
@@ -419,13 +427,14 @@ fun App(dao: AppDao) {
                     else -> {
                         val s = sub
                         if (s == null) {
-                            SettingsHub(led, syncState) { sub = it }
+                            SettingsHub(led, syncState) { sub = it; loanFromHome = false }
                         } else {
                             val back = { sub = null }
                             when (s) {
                                 "laporan" -> SubScreen("Laporan dan cetak", back, false) { Reports(led, onExport, onPrint) }
                                 "emas" -> SubScreen("Grafik harga emas", back) { GoldHistoryPanel(goldHist, true) }
                                 "saldo" -> SubScreen("Saldo awal saving", back) { SaldoAwalScreen(led, dao, scope) }
+                                "hutang" -> SubScreen("Hutang ke saving", { if (loanFromHome) tab = 0; sub = null }) { LoansScreen(led, dao, scope) }
                                 "sinkron" -> SubScreen("Sinkronisasi", back) { SyncPanel(dao, scope, syncMsg, runSync) }
                                 "printer" -> SubScreen("Printer Bluetooth", back) { PrinterPanel(onPrint) }
                                 "kunci" -> SubScreen("Kunci aplikasi", back) { LockPanel() }
@@ -989,6 +998,11 @@ fun Reports(led: Ledger, onExport: (LocalDate) -> Unit, onPrint: (ByteArray) -> 
                 Line("Pengeluaran", rp(p.expense))
                 Line("Selisih Operasional", rp(p.diff))
                 Line("Pembelian Aset Baru", rp(p.newAsset))
+                if (p.loanOut != 0L || p.loanIn != 0L || p.loanEnd != 0L) {
+                    Line("Pinjaman dari saving", rp(p.loanOut))
+                    Line("Pengembalian pinjaman", rp(p.loanIn))
+                    Line("Hutang ke saving (akhir)", rp(p.loanEnd))
+                }
                 Line("Perubahan Saving", rp(p.savingChange))
                 Line("Saving Akhir", rp(p.savingEnd))
                 Line("Non-Liquid Akhir", rp(p.nonLiquidEnd))

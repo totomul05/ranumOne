@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.ShowChart
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -94,7 +95,7 @@ fun SubScreen(title: String, onBack: () -> Unit, scroll: Boolean = true, content
 fun Dashboard(
     led: Ledger, syncState: Int, onSync: () -> Unit,
     checks: List<Setting>, onCheck: (Long, Long) -> Unit,
-    target: Long, onTarget: (Long) -> Unit
+    target: Long, onTarget: (Long) -> Unit, onLoans: () -> Unit
 ) {
     var m by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     var showCheck by remember { mutableStateOf(false) }
@@ -103,6 +104,7 @@ fun Dashboard(
     var showTrend by remember { mutableStateOf(false) }
     val saving = led.savingBefore(LocalDate.MAX)
     val nl = led.assets.sumOf { led.value(it) }
+    val owed = led.outstandingBefore(LocalDate.MAX)
     val p = led.period("", m, m.plusMonths(1))
     val golds = led.assets.filter { it.gold }
     val goldModal = golds.sumOf { it.price }
@@ -146,7 +148,7 @@ fun Dashboard(
             Column(Modifier.padding(18.dp)) {
                 Text("Net worth", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.8f))
                 Text(
-                    rp(saving + nl), style = MaterialTheme.typography.headlineMedium,
+                    rp(saving + nl + owed), style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold, color = Color.White
                 )
                 Spacer(Modifier.height(12.dp))
@@ -160,6 +162,12 @@ fun Dashboard(
                     Column(Modifier.weight(1f)) {
                         Text("Aset non-likuid", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.75f))
                         Text(rp(nl), fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                    if (owed != 0L) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Hutang ke saving", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.75f))
+                            Text(rp(owed), fontWeight = FontWeight.Bold, color = Color.White)
+                        }
                     }
                 }
             }
@@ -273,6 +281,11 @@ fun Dashboard(
                 }
             }
             HorizontalDivider(color = Pal.cur.bd)
+            MenuRow(
+                Icons.Rounded.SwapHoriz, "Hutang ke saving",
+                if (owed > 0L) "Belum lunas " + rp(owed) else "Belum ada pinjaman"
+            ) { onLoans() }
+            HorizontalDivider(color = Pal.cur.bd)
             MenuRow(Icons.Rounded.AccountBalance, "Cek kas", "Bandingkan dengan uang sebenarnya") { showCheck = true }
         }
         Spacer(Modifier.height(8.dp))
@@ -318,6 +331,11 @@ fun SettingsHub(led: Ledger, syncState: Int, onOpen: (String) -> Unit) {
         SectionLabel("Keuangan")
         Panel("") {
             MenuRow(Icons.Rounded.AccountBalanceWallet, "Saldo awal saving", rp(led.otherSaving)) { onOpen("saldo") }
+            HorizontalDivider(color = Pal.cur.bd)
+            MenuRow(
+                Icons.Rounded.SwapHoriz, "Hutang ke saving",
+                led.outstandingBefore(LocalDate.MAX).let { if (it > 0L) "Belum lunas " + rp(it) else "Belum ada pinjaman" }
+            ) { onOpen("hutang") }
         }
 
         SectionLabel("Sistem")

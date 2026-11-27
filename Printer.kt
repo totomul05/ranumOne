@@ -147,6 +147,11 @@ private fun summary(e: Esc, p: Period) {
     e.text(lr("Pengeluaran", rp(p.expense)))
     e.bold(true); e.text(lr("Selisih", rp(p.diff))); e.bold(false)
     e.text(lr("Beli aset baru", rp(p.newAsset)))
+    if (p.loanOut != 0L || p.loanIn != 0L || p.loanEnd != 0L) {
+        e.text(lr("Pinjaman keluar", rp(p.loanOut)))
+        e.text(lr("Pinjaman kembali", rp(p.loanIn)))
+        e.text(lr("Hutang akhir", rp(p.loanEnd)))
+    }
     e.text(lr("Perubahan saving", rp(p.savingChange)))
     e.text(lr("Saving akhir", rp(p.savingEnd)))
     e.text(lr("Non-liquid akhir", rp(p.nonLiquidEnd)))
