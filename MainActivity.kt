@@ -97,6 +97,10 @@ class MainActivity : ComponentActivity() {
         val dao = AppDb.get(this).dao()
         Stamp.see(prefs(this).getLong("seen", 0L))
         if (Reminder.enabled(this)) Reminder.schedule(this)
+        if (Backup.enabled(this)) {
+            Backup.schedule(this)
+            Backup.catchUp(this)
+        }
         Pal.idx = prefs(this).getInt("theme", 0)
         setContent {
             MaterialTheme(colorScheme = appScheme()) { Gate(dao) }
@@ -436,6 +440,7 @@ fun App(dao: AppDao) {
                                 "saldo" -> SubScreen("Saldo awal saving", back) { SaldoAwalScreen(led, dao, scope) }
                                 "hutang" -> SubScreen("Hutang ke saving", { if (loanFromHome) tab = 0; sub = null }) { LoansScreen(led, dao, scope) }
                                 "sinkron" -> SubScreen("Sinkronisasi", back) { SyncPanel(dao, scope, syncMsg, runSync) }
+                                "cadangan" -> SubScreen("Cadangan otomatis", back) { BackupPanel(scope) }
                                 "printer" -> SubScreen("Printer Bluetooth", back) { PrinterPanel(onPrint) }
                                 "kunci" -> SubScreen("Kunci aplikasi", back) { LockPanel() }
                                 "pengingat" -> SubScreen("Pengingat harian", back) { ReminderPanel() }

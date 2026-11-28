@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AccountBalance
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Assessment
+import androidx.compose.material.icons.rounded.Backup as BackupIcon
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -308,6 +309,7 @@ fun SettingsHub(led: Ledger, syncState: Int, onOpen: (String) -> Unit) {
     }
     val printer = prefs(ctx).getString("printer_name", null) ?: "Belum dipilih"
     val reminder = if (Reminder.enabled(ctx)) "Aktif, pukul 19.00" else "Mati"
+    val backupText = if (Backup.enabled(ctx)) "Aktif, tiap tengah malam" else "Mati"
     val syncText = if (!linked) {
         "Belum terhubung"
     } else {
@@ -341,6 +343,8 @@ fun SettingsHub(led: Ledger, syncState: Int, onOpen: (String) -> Unit) {
         SectionLabel("Sistem")
         Panel("") {
             MenuRow(Icons.Rounded.Sync, "Sinkronisasi", syncText) { onOpen("sinkron") }
+            HorizontalDivider(color = Pal.cur.bd)
+            MenuRow(Icons.Rounded.BackupIcon, "Cadangan otomatis", backupText) { onOpen("cadangan") }
             HorizontalDivider(color = Pal.cur.bd)
             MenuRow(Icons.Rounded.Print, "Printer Bluetooth", printer) { onOpen("printer") }
             HorizontalDivider(color = Pal.cur.bd)
